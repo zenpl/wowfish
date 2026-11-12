@@ -175,7 +175,8 @@ def main():
     ap.add_argument("--hits", type=int, default=2, help="连续多少个 50ms 片段超阈值才触发 (默认 2)")
     ap.add_argument("--settle", type=float, default=2.5, help="抛竿后忽略声音的秒数 (默认 2.5)")
     ap.add_argument("--timeout", type=float, default=30, help="一竿最长等待秒数 (默认 30)")
-    ap.add_argument("--minutes", type=float, default=60, help="运行多少分钟后自动停止 (默认 60)")
+    ap.add_argument("--minutes", type=float, default=0, help="运行多少分钟后自动停止，0=一直跑 (默认 0)")
+    ap.add_argument("--max-misses", type=int, default=0, help="连续多少竿没咬钩就停止，0=永不停 (默认 0)")
     ap.add_argument("--calibrate", action="store_true", help="只显示声音电平，不按键")
     ap.add_argument("--debug", action="store_true", help="超时时打印每秒声音峰值")
     args = ap.parse_args()
@@ -190,10 +191,11 @@ def main():
         if args.calibrate:
             calibrate(meter)
             return
-        end = time.time() + args.minutes * 60
+        end = time.time() + args.minutes * 60 if args.minutes > 0 else float("inf")
         next_break = time.time() + random.uniform(8, 20) * 60
         casts = bites = misses = 0
-        log(f"开始：抛竿={args.cast_key} 互动={args.interact_key}，运行 {args.minutes:.0f} 分钟。Ctrl+C 停止。")
+        limit = f"运行 {args.minutes:.0f} 分钟" if args.minutes > 0 else "不限时"
+        log(f"开始：抛竿={args.cast_key} 互动={args.interact_key}，{limit}。Ctrl+C 停止。")
         while time.time() < end:
             wait_focus()
             if time.time() > next_break:
@@ -215,8 +217,8 @@ def main():
                 misses += 1
                 log("  没等到咬钩，重抛")
                 time.sleep(random.uniform(0.5, 1.5))
-                if misses >= 6:
-                    log("连续 6 竿没听到咬钩，停止。用 --calibrate 检查声音是否进了回环设备。")
+                if args.max_misses and misses >= args.max_misses:
+                    log(f"连续 {args.max_misses} 竿没听到咬钩，停止。用 --calibrate 检查声音是否进了回环设备。")
                     break
         log(f"结束：共 {casts} 竿，咬钩 {bites} 次")
     except KeyboardInterrupt:

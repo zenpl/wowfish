@@ -1,0 +1,10 @@
+## Interface: 16001
+## Title: ForeverQuant
+## Notes: 拍卖行机会列表（只展示建议，买卖由你手动完成）。Prices from AHledger.
+## Version: 0.1
+## SavedVariables: ForeverQuantDB
+## IconTexture: Interface\Icons\INV_Misc_Coin_01
+## AddonCompartmentFunc: ForeverQuant_OnAddonCompartmentClick
+Recommendations.lua
+Scan.lua
+Core.lua

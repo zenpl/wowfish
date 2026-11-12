@@ -1,3 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
+logs/
+*.out
+# 本机数据：行情库、缓存、本机设置、分析生成的插件数据
+forever-quant/data/
+forever-quant/local.toml
+forever-quant/addon/ForeverQuant/Recommendations.lua
