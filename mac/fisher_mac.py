@@ -19,6 +19,7 @@ import numpy as np
 import sounddevice as sd
 import Quartz
 from AppKit import NSWorkspace
+from Foundation import NSDate, NSRunLoop
 
 RATE = 16000
 CHUNK = 800  # 50ms
@@ -81,7 +82,9 @@ class AudioMeter:
 
 # ---------- 键盘 / 前台应用 ----------
 def front_app():
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    # 没有事件循环时 NSWorkspace 的前台应用是缓存值，不会更新；先泵一下 run loop
+    NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.02))
+    app =NSWorkspace.sharedWorkspace().frontmostApplication()
     return (app.localizedName() or "") if app else ""
 
 
