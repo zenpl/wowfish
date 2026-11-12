@@ -1,7 +1,7 @@
 """macOS 上的"看屏幕、按键、听声音"。接口和 Linux 版（fisher.py / vision.py 里的 X11 实现）一样，
 agent.py 不用关心在哪个系统上跑。
 
-注意：这一份没有在真机上测过。需要给运行它的终端三个权限（系统设置 → 隐私与安全性）：
+注意：这一份没有在真机上测过（只有 mac/fisher_mac.py 那个独立钓鱼脚本在真机上跑过，这里的前台判断和音量阈值沿用了它的经验）。需要给运行它的终端三个权限（系统设置 → 隐私与安全性）：
   辅助功能（发按键）、屏幕录制（读游戏窗口左上角的信号块）、麦克风（听 BlackHole 回环的游戏声音）。
 """
 import queue
@@ -13,6 +13,7 @@ import numpy as np
 import Quartz
 import sounddevice as sd
 from AppKit import NSWorkspace
+from Foundation import NSDate, NSRunLoop
 
 RATE, CHUNK = 16000, 800            # 和 fisher.py 一致：50ms 一段
 APP_HINTS = ("world of warcraft", "wow", "魔兽世界", "魔獸世界")
@@ -67,6 +68,8 @@ def grab(x, y, w, h):
 # ---------- 键盘 / 前台 ----------
 class Keyboard:
     def wow_focused(self):
+        # 没有事件循环时 NSWorkspace 的前台应用是缓存值，不会更新；先泵一下 run loop（独立版钓鱼脚本在真机上踩过这个坑）
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.02))
         app = NSWorkspace.sharedWorkspace().frontmostApplication()
         return _is_wow(app.localizedName() if app else "")
 

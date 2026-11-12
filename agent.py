@@ -163,8 +163,9 @@ def main():
     ap.add_argument("--de-interval", type=float, default=4.6, help="自动分解两次按键的平均间隔秒数 (默认 4.6)")
     ap.add_argument("--no-analysis", action="store_true", help="不启动行情分析")
     ap.add_argument("--ratio", type=float, default=3.0)
-    ap.add_argument("--min-rms", type=float, default=700)
-    ap.add_argument("--max-rms", type=float, default=1800)
+    mac = sys.platform == "darwin"      # macOS 经 BlackHole 采到的音量量纲小得多；60/300 是独立钓鱼脚本在真机上校出来的
+    ap.add_argument("--min-rms", type=float, default=60 if mac else 700)
+    ap.add_argument("--max-rms", type=float, default=300 if mac else 1800)
     ap.add_argument("--hits", type=int, default=2)
     ap.add_argument("--settle", type=float, default=2.5)
     ap.add_argument("--timeout", type=float, default=30)

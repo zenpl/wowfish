@@ -32,7 +32,7 @@ WOW_ADDONS="/…/World of Warcraft/_forever_/Interface/AddOns" ./install.sh
 
 | | Linux | macOS |
 |---|---|---|
-| 状态 | 日常在用 | **移植版，没有在真机上测过** |
+| 状态 | 日常在用 | **电脑端程序是移植版，没有在真机上测过**（只有 `mac/fish.sh` 独立钓鱼脚本跑过） |
 | 桌面 | X11 会话（Wayland 不行） | — |
 | 听声钓鱼 | PipeWire（`pw-record`） | BlackHole 虚拟声卡 + 多输出设备，见 `mac/README.md` |
 | 权限 | — | 终端要有：辅助功能、屏幕录制、麦克风 |
