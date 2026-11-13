@@ -1919,7 +1919,7 @@ function Trade.Enqueue()            -- 把当前名单里够格的候选排进�
     local cfg = TradeCfg()
     local added = 0
     for _, op in ipairs(gearAll) do
-        if op.ikey and Verdict(op) == "buy" and not Trade.done[op.key] then
+        if op.ikey and Verdict(op) == "buy" and not Trade.done[op.key] and not op.peerPending then      -- 同款还没查的先不排，查完那一刻直接买
             Trade.done[op.key] = true
             Trade.queue[#Trade.queue + 1] = op
             added = added + 1
@@ -1955,6 +1955,29 @@ function Trade.Drop(op)             -- 你标了「不要」：排着队的拿�
         Trade.cur, Trade.ready, Trade.state = nil, nil, "idle"
         if not auto then signal:Hide() end
     end
+end
+
+-- 进入"待买"：亮信号请电脑端按键
+function Trade.MakeReady(op, auctionID, price)
+    Trade.cur, Trade.ready = op, { op = op, auctionID = auctionID, price = price }
+    Trade.state, Trade.since = "ready", GetTime()
+    print(string.format("|cff55ccffFQ|r |cff40ff40待买|r %s %s  %s → 目标 %s。按 %s 买入。", Stars(op.stars), op.name or "?",
+        SilverText(price), SilverText(op.target_unit_price), Trade.key or "买入键"))
+    buySignal:ShowKey(Trade.keyIdx)        -- 进了"待买"的都是该买的（自动买入挑的，或你亲手标「要」的）：直接请电脑端按键
+    if frame:IsShown() then Refresh() end
+end
+-- 刚查完这件的全部挂单（同款印证 / 快扫），手里就有最便宜那条的编号：该买的当场进"待买"，不再排队重查一遍
+function Trade.Direct(op, best)
+    if Trade.state ~= "idle" or not best or not op.ikey or (op.key and Trade.done[op.key]) then return false end
+    if not (Trade.on or op.marked == "want") or Verdict(op) ~= "buy" then return false end
+    if best.buyoutAmount > op.max_unit_price or best.buyoutAmount > GetMoney() then return false end
+    if not ForeverQuantAction.key then ForeverQuantAction.Bind() end
+    Trade.key, Trade.keyIdx = ForeverQuantAction.key, ForeverQuantAction.keyIdx
+    if not Trade.keyIdx then return false end
+    if op.key then Trade.done[op.key] = true end
+    for i = #Trade.queue, 1, -1 do if Trade.queue[i] == op then table.remove(Trade.queue, i) end end
+    Trade.MakeReady(op, best.auctionID, best.buyoutAmount)
+    return true
 end
 
 local function TradeSkip(why)
@@ -2007,9 +2030,17 @@ function Peer.Check(list)           -- 重扫之后调用：有缓存的直接�
     for _, op in ipairs(list) do
         if op.ikey and op.key and not op.peer then
             local c = Peer.cache[op.key]
-            if c and now - c.t < PEER_TTL then PeerApply(op, c) else Peer.queue[#Peer.queue + 1] = op end
+            if c and now - c.t < PEER_TTL then PeerApply(op, c) else Peer.queue[#Peer.queue + 1] = op; op.peerPending = true end
         end
     end
+    table.sort(Peer.queue, function(a, b)                                  -- 最可能要买的先查：标「要」的、星级高的、差价大的
+        local wa, wb = a.marked == "want" and 1 or 0, b.marked == "want" and 1 or 0
+        if wa ~= wb then return wa > wb end
+        if (a.stars or 1) ~= (b.stars or 1) then return (a.stars or 1) > (b.stars or 1) end
+        local ga, gb = Gap(a), Gap(b)
+        if ga ~= gb then return ga > gb end
+        return (a.key or "") < (b.key or "")
+    end)
     for k, c in pairs(Peer.cache) do if now - c.t >= PEER_TTL then Peer.cache[k] = nil end end
     ApplyMarks(gearAll); ApplyMarks(gearBudget)
 end
@@ -2031,35 +2062,42 @@ pcall(Peer.frame.RegisterEvent, Peer.frame, "ITEM_SEARCH_RESULTS_UPDATED")
 Peer.frame:SetScript("OnEvent", function()
     local op = Peer.cur
     if not op then return end
-    local prices = {}
+    local prices, best = {}, nil
     for i = 1, (C_AuctionHouse.GetNumItemSearchResults(op.ikey) or 0) do
         local info = C_AuctionHouse.GetItemSearchResultInfo(op.ikey, i)
         if info and (info.buyoutAmount or 0) > 0 and not info.containsOwnerItem and not info.containsAccountItem then
             prices[#prices + 1] = info.buyoutAmount
+            if info.auctionID and (not best or info.buyoutAmount < best.buyoutAmount) then best = info end
         end
     end
     table.sort(prices)
-    Peer.cur = nil
+    Peer.cur, op.peerPending = nil, nil
     if prices[1] and prices[1] <= op.max_unit_price then                   -- 便宜的那件还在，剩下的才是"同款别人的挂价"
         local show = {}
         for i = 1, math.min(#prices, 8) do show[i] = SilverText(prices[i]) end
         local p = { t = GetTime(), n = #prices - 1, low = prices[2] or 0, text = table.concat(show, " / ") .. (#prices > 8 and " …" or "") }
         Peer.cache[op.key] = p
         PeerApply(op, p)
+        ApplyMarks(gearAll); ApplyMarks(gearBudget)
+        if op.peer == "flat" and op.marked ~= "want" then ForeverQuantTrade.Drop(op)
+        elseif not ForeverQuantTrade.Direct(op, best) and ForeverQuantTrade.on then ForeverQuantTrade.Enqueue() end      -- 查完一条就买一条，不等整轮
     end
     if #Peer.queue == 0 then PeerDone() end
 end)
 Peer.frame:SetScript("OnUpdate", function(_, elapsed)
     Peer.tick = Peer.tick + elapsed
-    if Peer.tick < 0.3 then return end
+    if Peer.tick < 0.1 then return end
     Peer.tick = 0
     if Peer.cur then
-        if GetTime() - Peer.since > 6 then Peer.cur = nil; if #Peer.queue == 0 then PeerDone() end end      -- 查询超时：跳过这条
+        if GetTime() - Peer.since > 6 then Peer.cur.peerPending = nil; Peer.cur = nil; if #Peer.queue == 0 then PeerDone() end end      -- 查询超时：跳过这条
         return
     end
     if #Peer.queue == 0 then return end
-    if not (AuctionHouseFrame and AuctionHouseFrame:IsShown()) then Peer.queue = {} return end
-    if ForeverQuantScan.running or Trade.state ~= "idle" or Pricing.cur or Pool.cur or Pool.fav or not C_AuctionHouse.IsThrottledMessageSystemReady() then return end
+    if not (AuctionHouseFrame and AuctionHouseFrame:IsShown()) then
+        for _, q in ipairs(Peer.queue) do q.peerPending = nil end
+        Peer.queue = {} return
+    end
+    if ForeverQuantScan.running or Trade.state ~= "idle" or #Trade.queue > 0 or Pricing.cur or Pool.cur or Pool.fav or not C_AuctionHouse.IsThrottledMessageSystemReady() then return end
     Peer.cur, Peer.since = table.remove(Peer.queue, 1), GetTime()
     if not pcall(C_AuctionHouse.SendSearchQuery, Peer.cur.ikey, {}, false) then Peer.cur = nil end
 end)
@@ -2070,6 +2108,7 @@ end)
 -- 全量扫描只隔一段时间做一次，用来发现新面孔和刷新参照价。
 --------------------------------------------------------------------------------
 local POOL_MIN_STARS, POOL_GAP, POOL_MIN_PROFIT = 2, 2.0, 1500        -- 进池的最低历史星级；目标价至少是现价的几倍；最低净赚（铜）
+local POOL_MIN_TARGET, POOL_MAX = 3000, 100                          -- 能卖的价低于这个数的不进池（赚头太薄）；池子最多几件（不超过偏好位，一次批量查完）
 function Pool.Busy() return Pool.cur ~= nil or Pool.fav ~= nil or #Pool.queue > 0 end
 -- 卖出过几次（按名字）：每分钟最多重算一次
 function Pool.SoldCount()
@@ -2084,8 +2123,9 @@ function Pool.SoldCount()
     Pool.sold, Pool.soldAt = c, GetTime()
     return c
 end
--- 返回这一轮要查的名单。偏好位有限，所以排序就是优先级：
---   你标「要」的 > 真卖出去过的（卖得多的在前）> 差价绝对值大的（目标价 - 买价）
+-- 返回这一轮要查的名单。池子有上限，所以排序就是去留：
+--   你标「要」的最先；其余按 差价绝对值（目标价 - 买价）× 卖出加成 排，卖过 1/2/3 次以上分别算 2/3/4 倍。
+--   这样卖过的优先，但没卖过的大差价货不会被卖过一次的小货挤出去。
 function Pool.Build()
     local sold = Pool.SoldCount()
     local list, marks = {}, ForeverQuantDB.marks or {}
@@ -2093,21 +2133,24 @@ function Pool.Build()
         if kn.id and kn.name then
             local mark = MarkOf(marks[kn.id .. ":" .. (kn.suffix or 0)])
             local best = (mark == "want") and 4 or (kn.best or kn.stars or 1)
-            if mark ~= "no" and best >= POOL_MIN_STARS and (kn.suffix or 0) ~= 0 then
+            if mark ~= "no" and best >= POOL_MIN_STARS and (kn.suffix or 0) ~= 0
+                and (mark == "want" or (kn.target or 0) >= POOL_MIN_TARGET) then
                 local ilvl = kn.ilvl or select(4, ItemInfo(kn.id))
                 if ilvl then
                     list[#list + 1] = { kn = kn, best = best, ilvl = ilvl, want = (mark == "want") and 1 or 0,
                                         sold = sold[kn.name] or 0, margin = (kn.target or 0) - (kn.buy or 0) }
+                    list[#list].score = list[#list].margin * (1 + math.min(list[#list].sold, 3))
                 end
             end
         end
     end
     table.sort(list, function(a, b)
         if a.want ~= b.want then return a.want > b.want end
-        if a.sold ~= b.sold then return a.sold > b.sold end
-        if a.margin ~= b.margin then return a.margin > b.margin end
+        if a.score ~= b.score then return a.score > b.score end
         return a.kn.id < b.kn.id
     end)
+    local cap = math.min(POOL_MAX, ForeverQuantDB.favCap or POOL_MAX)      -- 排在后面的直接不查，不再逐件轮流
+    for i = #list, cap + 1, -1 do list[i] = nil end
     return list
 end
 function Pool.Size() return #Pool.Build() end
@@ -2256,11 +2299,12 @@ Pool.frame:SetScript("OnEvent", function(_, event)
     end
     local e = Pool.cur
     if not e then return end
-    local prices = {}
+    local prices, best = {}, nil
     for i = 1, (C_AuctionHouse.GetNumItemSearchResults(e.ikey) or 0) do
         local info = C_AuctionHouse.GetItemSearchResultInfo(e.ikey, i)
         if info and (info.buyoutAmount or 0) > 0 and not info.containsOwnerItem and not info.containsAccountItem then
             prices[#prices + 1] = info.buyoutAmount
+            if info.auctionID and (not best or info.buyoutAmount < best.buyoutAmount) then best = info end
         end
     end
     table.sort(prices)
@@ -2271,7 +2315,8 @@ Pool.frame:SetScript("OnEvent", function(_, event)
         table.insert(gearAll, 1, op)
         if gearBudget ~= gearAll then table.insert(gearBudget, 1, op) end
         ApplyMarks(gearAll); ApplyMarks(gearBudget)
-        if op.marked == "want" and Verdict(op) == "buy" then Trade.BuyNow(op) elseif Trade.on then Trade.Enqueue() end      -- 不等这一轮查完，马上去买
+        if Trade.Direct(op, best) then                              -- 挂单编号已经在手里：当场进待买，不重查
+        elseif op.marked == "want" and Verdict(op) == "buy" then Trade.BuyNow(op) elseif Trade.on then Trade.Enqueue() end
     end
     if #Pool.queue == 0 then PoolDone() end
 end)
@@ -2340,24 +2385,19 @@ tradeFrame:SetScript("OnEvent", function(_, event)
         return TradeSkip(string.format("现在最低 %s，高于建议买价 %s", SilverText(best.buyoutAmount), SilverText(op.max_unit_price)))
     end
     if best.buyoutAmount > GetMoney() then return TradeSkip("金币不够") end
-    Trade.ready = { op = op, auctionID = best.auctionID, price = best.buyoutAmount }
-    Trade.state = "ready"
-    print(string.format("|cff55ccffFQ|r |cff40ff40待买|r %s %s  %s → 目标 %s。按 %s 买入。", Stars(op.stars), op.name or "?",
-        SilverText(best.buyoutAmount), SilverText(op.target_unit_price), Trade.key or "买入键"))
-    buySignal:ShowKey(Trade.keyIdx)        -- 进了"待买"的都是该买的（自动买入挑的，或你亲手标「要」的）：直接请电脑端按键
-    if frame:IsShown() then Refresh() end
+    Trade.MakeReady(op, best.auctionID, best.buyoutAmount)
 end)
 
 local tradeTick = 0
 tradeFrame:SetScript("OnUpdate", function(_, elapsed)
     tradeTick = tradeTick + elapsed
-    if tradeTick < 0.3 then return end
+    if tradeTick < 0.1 then return end
     tradeTick = 0
     if not Trade.on and #Trade.queue == 0 and Trade.state == "idle" then return end      -- 关着时只处理你亲手标「要」的那几条
     local now = GetTime()
     if Trade.state == "idle" then
         if #Trade.queue > 0 and AuctionHouseFrame and AuctionHouseFrame:IsShown() and not ForeverQuantScan.running
-            and not Pricing.cur and not Pool.cur and not Pool.fav and not Peer.Busy()        -- 先等同款印证查完，免得买到"同款都只值这个价"的
+            and not Pricing.cur and not Pool.cur and not (Pool.fav and Pool.fav.sent) and not Peer.cur      -- 排进来的都已经查过同款了：插在剩下的印证前面买
             and C_AuctionHouse.IsThrottledMessageSystemReady() then
             Trade.cur = table.remove(Trade.queue, 1)
             Trade.state, Trade.since = "searching", now

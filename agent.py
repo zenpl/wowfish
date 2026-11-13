@@ -193,8 +193,7 @@ def main():
             # 1) 买入 / 上架：按一次，等信号消失
             if scr["press"] and scr["press"][1] == "fast":
                 key = scr["press"][0]
-                time.sleep(random.uniform(0.15, 0.4))
-                kb.tap(key)
+                kb.tap(key)                      # 买入要抢时间：看到信号就按，不另外等
                 fast_total += 1
                 # 这个键也是每分钟一次的在线心跳，所以不逐条记日志，只在第一次和每 30 次报一下
                 if fast_total == 1 or fast_total % 30 == 0:
@@ -204,8 +203,7 @@ def main():
                     p = read_screen()["press"]
                     if not p or p[1] != "fast":
                         break
-                    time.sleep(0.2)
-                time.sleep(0.3)
+                    time.sleep(0.05)
                 continue
 
             # 2) 分解：信号亮着就隔几秒按一次
@@ -246,7 +244,7 @@ def main():
             if fish_on:
                 fish_on = False
                 fishing.end("游戏里关掉了")
-            time.sleep(0.3)
+            time.sleep(0.1)
     except KeyboardInterrupt:
         print()
         if fish_on:

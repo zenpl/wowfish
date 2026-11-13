@@ -181,6 +181,25 @@ g.ForeverQuantDB.ledger = L.table_from([f"{T}|BUY|101|0|1|1500|x|", f"{T+9}|VEND
 S = Lg.Stats()
 check("卖店记账：收回 3s 算现金，亏 12s 算进净赚，不再压货", (S.back[2], S.profit[2], S.heldCost, S.vendorN[2]) == (300, -1200, 0, 1))
 
+# ---- 查完当场买
+Tr = g.ForeverQuantTrade
+A = g.ForeverQuantAction; A.key, A.keyIdx = "F6", 1
+def cand(**kw):
+    return L.table_from(dict(dict(item_id=7, suffix_id=2, name="y", strategy="GEAR", ikey=L.table(), key="7:2:1000", max_unit_price=1000,
+                                  target_unit_price=5000, stars=3, verified=True), **kw))
+best = lambda price: L.table_from({"auctionID": 99, "buyoutAmount": price})
+Tr.on, Tr.state, Tr.queue = True, "idle", L.table()
+c = cand()
+check("刚查完同款、该买的：不排队重查，当场进待买", Tr.Direct(c, best(1000)) and Tr.state == "ready" and Tr.ready.auctionID == 99 and Tr.done["7:2:1000"])
+Tr.state, Tr.cur, Tr.ready = "idle", None, None
+check("同一条挂单不会买第二次", not Tr.Direct(c, best(1000)))
+check("最便宜的那条已经涨过建议买价：不买", not Tr.Direct(cand(key="7:2:b"), best(1200)) and Tr.state == "idle")
+check("不够格的（二星差价不到 3 倍）：不买", not Tr.Direct(cand(key="7:2:c", stars=2, target_unit_price=2500), best(1000)))
+Tr.on = False
+check("自动买入关着：不买", not Tr.Direct(cand(key="7:2:d"), best(1000)))
+Tr.on = True
+Tr.on, Tr.state, Tr.queue = False, "idle", L.table()
+
 # ---- 高概率池
 Pl = g.ForeverQuantPool
 g.ForeverQuantDB.marks = L.table()
@@ -190,10 +209,18 @@ g.ForeverQuantDB.marks["4:7"] = "no"; g.ForeverQuantDB.marks["1:7"] = "want"
 order = [e.kn.id for e in Pl.Build().values()]
 check("池子：标「要」的最先；标「不要」的不进", order[0] == 1 and 4 not in order and sorted(order) == [1, 2, 3])
 g.ForeverQuantDB.marks = L.table()
-g.ForeverQuantDB.known = L.table_from({"a": kn(51, 3, target=3000, buy=1000), "b": kn(52, 2, target=9000, buy=1000), "c": kn(53, 2, target=2500, buy=1000)})
-g.ForeverQuantDB.ledger = L.table_from([f"{T}|POST|53|0|1|2500|货53|dep=1", f"{T+5}|SOLD|0|0|1|0|货53|"])
+g.ForeverQuantDB.known = L.table_from({"a": kn(51, 3, target=4000, buy=1000), "b": kn(52, 2, target=9000, buy=1000), "c": kn(53, 2, target=3500, buy=1000),
+                                       "d": kn(54, 3, target=2500, buy=500)})
+g.ForeverQuantDB.ledger = L.table_from([f"{T}|POST|53|0|1|3500|货53|dep=1", f"{T+5}|SOLD|0|0|1|0|货53|"])
 Pl.soldAt = None
-check("优先级：卖出去过的排最前，其次差价绝对值大的（不看星级）", [e.kn.id for e in Pl.Build().values()] == [53, 52, 51])
+check("优先级：差价 × 卖出加成；卖过的小货排在同档没卖过的前面，但挤不掉大差价的；能卖价不到 30s 的不进池",
+      [e.kn.id for e in Pl.Build().values()] == [52, 53, 51])
+g.ForeverQuantDB.known = L.table_from({str(i): kn(i, 3, target=3000 + i * 10) for i in range(1, 131)})
+ids = [e.kn.id for e in Pl.Build().values()]
+check("池子封顶 100 件，留下的是差价最大的", len(ids) == 100 and min(ids) == 31)
+g.ForeverQuantDB.favCap = 40
+check("偏好位更少时按偏好位封顶", len(list(Pl.Build().values())) == 40)
+g.ForeverQuantDB.favCap = None
 g.ForeverQuantDB.ledger = L.table(); Pl.soldAt = None
 e = L.table_from(dict(kn=kn(9, 3), ikey=L.table()))
 o = Pl.Judge(e, L.table_from([2000, 6500, 6800, 7000]))
