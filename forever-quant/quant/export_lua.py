@@ -47,13 +47,24 @@ def blue_lines(blue):
     """蓝色武器逐件的价格画像（见 quant/blue.py）。"""
     if not blue or not blue.get("items"):
         return []
+    from .blue import snipe
+    pick = snipe(blue["items"], watch=blue.get("watch") or ())
     lines = ["    blue = {", f"        at = {int(blue['at'])},", "        items = {"]
     for r in blue["items"]:
-        lines.append("            { " + ", ".join([
+        sn = pick.get(r["item_id"])
+        extra = [f"ilvl = {r.get('ilvl') or 0}"] + ([f"snipe = {lua_str(sn[0])}", f"line = {sn[1]}", f"ref = {sn[2]}"] if sn else [])
+        nd = (blue.get("need") or {}).get(r["item_id"])
+        if nd:
+            extra += [f"need = {nd['need']}", f"who = {lua_str(nd['who'])}", f"why = {lua_str(nd['why'].replace(chr(10), ' ## '))}"]
+        lines.append("            { " + ", ".join(extra + [
             f"item_id = {r['item_id']}", f"name = {lua_str(r['name'])}", f"kind = {lua_str(r['kind'])}", f"req = {r['req']}",
             f"cur = {r['cur']}", f"qty = {r['qty']}", f"typ = {r['typ']}", f"low = {r['low']}", f"high = {r['high']}", f"recent = {r.get('recent') or r['typ']}",
             f"spd = {r['spd']:.1f}", f"points = {r['points']}"]) + " },")
-    return lines + ["        },", "    },"]
+    lines.append("        },")
+    ids = blue.get("ref_ids") or []
+    if ids:
+        lines.append("        ref_ids = { " + ", ".join(str(i) for i in ids) + " },")
+    return lines + ["    },"]
 
 
 def tod_lines(tod):

@@ -393,6 +393,21 @@ def suffix_value(rule, key, label):
     return best
 
 
+# "melee" 这组在规则里是"要敏捷/攻强的人"：盗贼、40 级前的猎人、增强萨。估价按属性走没问题，但具体到武器，谁能用是不一样的：
+# 盗贼只用匕首、单手剑、单手锤、拳套，不能用斧子，也不用双手武器；斧子和双手武器的敏捷/攻强买家是猎人和增强萨。
+# 所以理由里写的职业名要按武器类型换，不能一律写盗贼。
+WEAPON_MELEE_WHO = {"weapon_axe1h": "猎人/萨满", "weapon_2h": "猎人/萨满", "weapon_mace2h": "萨满", "weapon_staff": "猎人/野德",
+                    "weapon_ranged": "猎人", "weapon_fist": "盗贼/萨满", "weapon_dagger": "盗贼", "weapon_sword1h": "盗贼/猎人",
+                    "weapon_mace1h": "盗贼/萨满", "weapon": "近战"}
+
+
+def role_name(key, role, short=False):
+    """这条规则（装备类型）下，这个角色该叫什么。"""
+    if role == "melee" and key in WEAPON_MELEE_WHO:
+        return WEAPON_MELEE_WHO[key]
+    return (ROLE_SHORT if short else ROLE_NAME).get(role, role)
+
+
 ROLE_SHORT = {"mage": "法师", "warlock": "术士", "priest": "牧师", "caster": "法系", "melee": "盗贼", "paladin": "圣骑", "druid": "德鲁伊", "druid_caster": "法系德", "feral": "野德"}    # 面板理由里用的短名
 STAT_CN = {"agi": "敏捷", "str": "力量", "int": "智力", "sta": "耐力", "spi": "精神", "ap": "攻强", "sp": "法伤", "heal": "治疗",
            "sp_shadow": "暗影法伤", "sp_fire": "火焰法伤", "sp_frost": "冰霜法伤", "sp_arcane": "奥术法伤", "sp_holy": "神圣法伤", "sp_nature": "自然法伤",
@@ -642,19 +657,19 @@ def find_by_rule(rows, s, rule, sold=None, max_price=None, prem=None):
                 # 有角色表：利润占 40 分，后缀价值占 10 分
                 c.score = round((50 if ok else 20) + min(profit, 10000) / 10000 * 40 + min(value, 1.0) * 10, 1)
                 c.highlight = role_star
-                c.notes.append(f"属性有 {value * 100:.0f}% 落在{ROLE_NAME.get(role, role)}想要的属性上")
+                c.notes.append(f"属性有 {value * 100:.0f}% 落在{role_name(key, role)}想要的属性上")
             else:
                 c.highlight = r["label"] in star
             index, wants = demand_index(rule, key, r["label"])
             if len(wants) > 1:
                 extra = round(min(rule.get("multi_role_cap", 15), rule.get("multi_role_bonus", 10) * sum(v for _, v in wants[1:])), 1)
                 c.score = round(c.score + extra, 1)
-                c.notes.append(f"多职业需求（指数 {index:.2f}）：" + "、".join(f"{ROLE_NAME.get(ro, ro)} {v * 100:.0f}%" for ro, v in wants))
+                c.notes.append(f"多职业需求（指数 {index:.2f}）：" + "、".join(f"{role_name(key, ro)} {v * 100:.0f}%" for ro, v in wants))
             if need:
                 c.score = round(c.score + rule.get("need_bonus", 5), 1)
                 c.notes.append("特定需求：这类装备上带" + "+".join(sorted(need)) + "是专门有人找的（比如圣骑兼职奶要智力撑蓝量）；替代品只算同样带它的")
             if role:
-                who = ROLE_NAME.get(role, role)
+                who = role_name(key, role)
                 if n_alt == 0:
                     c.score = round(c.score + rule.get("scarcity_bonus", 10), 1)
                     c.notes.append(f"稀缺：同部位、物品等级 ±{alt_range} 内，没有对{who}同样好或更好的其他装备在售")
@@ -676,7 +691,7 @@ def find_by_rule(rows, s, rule, sold=None, max_price=None, prem=None):
             # 面板的列宽有限，理由写得紧凑；完整说明在鼠标提示里
             why_parts.append("属性待确认" if unsure else ("已验证" if ok else "未验证"))
             if role:
-                why_parts.append(f"{ROLE_SHORT.get(role, role)} {stats_cn(rule, r['label'])} {value * 100:.0f}%")
+                why_parts.append(f"{role_name(key, role, short=True)} {stats_cn(rule, r['label'])} {value * 100:.0f}%")
             elif basis.get(r["label"]) == "数据":
                 why_parts.append("挂价偏贵")
             if c.highlight:

@@ -281,10 +281,10 @@ def cmd_gear(cfg, db, a):
             sv = {l: gear.suffix_value(rule, k, l) for l in labels}
             rule_export["value"][k] = {l: v[0] for l, v in sv.items() if v[2]}
             rule_export["star"][k] = {l: True for l, v in sv.items() if v[1]}
-            rule_export["role"][k] = {l: gear.ROLE_NAME.get(v[2], v[2]) for l, v in sv.items() if v[2]}
+            rule_export["role"][k] = {l: gear.role_name(k, v[2]) for l, v in sv.items() if v[2]}
             rule_export["ok"][k] = {l: True for l in labels if gear.is_confirmed(rule, k, l)}
             rule_export["role_key"][k] = {l: v[2] for l, v in sv.items() if v[2]}
-            rule_export["role_short"][k] = {l: gear.ROLE_SHORT.get(v[2], v[2]) for l, v in sv.items() if v[2]}
+            rule_export["role_short"][k] = {l: gear.role_name(k, v[2], short=True) for l, v in sv.items() if v[2]}
             # 好词缀的需求强度（1 = 主属性级别，小于 1 = 副属性级别）
             rule_export["tier"][k] = {l: gear.premium_strength(rule, k, l) for l in labels if gear.is_premium(rule, k, l)}
             # 多职业需求：加分数和说明文字都在这里算好，插件直接用
@@ -296,7 +296,7 @@ def cmd_gear(cfg, db, a):
                                                            rule.get("multi_role_bonus", 10) * sum(v for _, v in wants[1:])), 1)
                     rule_export["multi_n"][k][l] = len(wants)
                     rule_export["multi_note"][k][l] = f"多职业需求（指数 {index:.2f}）：" + "、".join(
-                        f"{gear.ROLE_NAME.get(ro, ro)} {v * 100:.0f}%" for ro, v in wants)
+                        f"{gear.role_name(k, ro)} {v * 100:.0f}%" for ro, v in wants)
             # 特定需求属性：导出成字符串（比如 "int"），插件里用它判断替代品是否也带
             rule_export["need"][k] = {l: "+".join(sorted(gear.needed_stats(rule, k, l))) for l in labels if gear.needed_stats(rule, k, l)}
         for role in (rule.get("roles") or {}):          # 每个职业下各后缀的价值：找替代品时要按同一个职业比
@@ -381,7 +381,17 @@ def _blue(cfg, db, snap):
     if not snap:
         return None
     try:
-        return bluemod.build(cfg, db, snap["id"])
+        b = bluemod.build(cfg, db, snap["id"])
+        if b:
+            b["watch"] = list((cfg.get("blue") or {}).get("watch") or [])      # 点名重点盯的蓝色武器（config.toml 的 [blue] watch）
+            # 要读面板的武器：42 级以下的蓝色和绿色武器全部（不管拍卖行现在有没有货），插件把提示文字存下来，
+            # 电脑端拿来比"这把蓝武比同等级段的绿武好多少"
+            gdb = bluemod.gear_db(cfg)
+            b["ref_ids"] = sorted(i for i, v in gdb.items() if v["cls"] == 2 and v["q"] in (2, 3) and 5 <= v["req"] <= 42)
+            # 需求指数：按职业的用法给每把蓝武打分（面板来自游戏里读到的提示文字；还没读到就没有）
+            sv = gear.find_saved_variables(cfg)
+            b["need"] = bluemod.classify(bluemod.read_tips(sv), gdb) if sv else {}
+        return b
     except Exception as e:
         print(f"蓝色武器分析跳过：{e}")
         return None

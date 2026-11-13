@@ -234,3 +234,7 @@ jewelry_cloak = ["melee", "druid", "druid_caster", "mage", "warlock", "priest", 
 "医师之" = ["sta", "int", "heal"]
 "祭司之" = ["sta", "spi", "heal"]       # of the Hierophant（按中文名对应的）。查证：耐力 + 精神 + 治疗
 "预言之" = ["int", "spi", "heal"]
+
+[blue]
+# 重点盯的蓝色武器（按名字）：不管日销和价位，一律进快扫的蓝武名单，出现明显低于其它挂单的就提醒 / 买入。
+watch = ["寒冰碎片", "巫术手杖", "浸毒骨矛", "纹章节杖"]
