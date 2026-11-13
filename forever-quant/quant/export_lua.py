@@ -43,6 +43,19 @@ def patch_watch(watch, ah_cut, path=OUT, now=None):
     return p
 
 
+def blue_lines(blue):
+    """蓝色武器逐件的价格画像（见 quant/blue.py）。"""
+    if not blue or not blue.get("items"):
+        return []
+    lines = ["    blue = {", f"        at = {int(blue['at'])},", "        items = {"]
+    for r in blue["items"]:
+        lines.append("            { " + ", ".join([
+            f"item_id = {r['item_id']}", f"name = {lua_str(r['name'])}", f"kind = {lua_str(r['kind'])}", f"req = {r['req']}",
+            f"cur = {r['cur']}", f"qty = {r['qty']}", f"typ = {r['typ']}", f"low = {r['low']}", f"high = {r['high']}", f"recent = {r.get('recent') or r['typ']}",
+            f"spd = {r['spd']:.1f}", f"points = {r['points']}"]) + " },")
+    return lines + ["        },", "    },"]
+
+
 def tod_lines(tod):
     """一天里各时段的价格规律（见 quant/tod.py）。"""
     if not tod or not tod.get("items"):
@@ -107,7 +120,7 @@ def rule_lines(rule_export):
     return lines
 
 
-def export(orders, names, market, generated_at, prices_at, path=OUT, recipes=None, ah_cut=0.05, disenchant=None, watch=None, rule=None, de=None, prices=None, tod=None):
+def export(orders, names, market, generated_at, prices_at, path=OUT, recipes=None, ah_cut=0.05, disenchant=None, watch=None, rule=None, de=None, prices=None, tod=None, blue=None):
     lines = ["-- 由 forever-quant 生成，请勿手改。Prices from AHledger (https://ahledger.com)",
              "ForeverQuantRecommendations = {",
              f"    generated_at = {int(generated_at)},",
@@ -149,6 +162,6 @@ def export(orders, names, market, generated_at, prices_at, path=OUT, recipes=Non
     lines += ["    },"]
     if prices:        # 行情源里各物品的最低价（铜）。钓鱼页估收益用；游戏内全量扫描后会被更新鲜的价格盖掉
         lines.append("    prices = { " + ", ".join(f"[{i}] = {p}" for i, p in sorted(prices.items())) + " },")
-    lines += tod_lines(tod) + rule_lines(rule) + de_lines(de) + watch_lines(watch, generated_at) + ["}", ""]
+    lines += blue_lines(blue) + tod_lines(tod) + rule_lines(rule) + de_lines(de) + watch_lines(watch, generated_at) + ["}", ""]
     Path(path).write_text("\n".join(lines), encoding="utf-8")
     return path

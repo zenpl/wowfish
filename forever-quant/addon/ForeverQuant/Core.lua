@@ -1,5 +1,5 @@
 -- ForeverQuant：展示 Python 生成的建议。只读行情、帮你搜索；不出价、不购买、不上架。
-local ROWS, ROW_H, WIDTH, NCOL = 16, 22, 880, 8
+local ROWS, ROW_H, WIDTH, NCOL = 16, 22, 880, 10
 local data = ForeverQuantRecommendations or {}
 local gearAll = data.opportunities or {}
 local gearBudget = {}
@@ -65,13 +65,14 @@ end
 --   三星但差价低                 -> 犹豫（列出来，不自动买）
 --   二星但差价特别高             -> 已验证的买；没验证的"值得看"
 --   同款抬轿子（别人都挂得贵）   -> 在同款印证那一步已经加了一星并算作已验证，所以二星会走到上面"买"的那一档
-local GAP_OK, GAP_BIG = 2.5, 4.0
+local GAP_OK, GAP_BIG = 2.5, 3.0      -- 三星的起买线；二星的起买线（本钱高了，从 4 倍降到 3 倍）
 local function Gap(op)
     if (op.max_unit_price or 0) <= 0 then return 0 end
     return (op.target_unit_price or 0) / op.max_unit_price
 end
 local function Verdict(op)
-    if op.marked == "want" then return "buy" end
+    -- 你标过「要」：意思是"这个差价倍数我愿意买"。以后差价不低于当时那个倍数才自动买；星级不因此改变。
+    if op.marked == "want" and Gap(op) >= (op.wantGap or 0) * 0.97 then return "buy" end
     if op.marked == "no" or op.peer == "flat" or op.strategy ~= "GEAR" then return "skip" end
     local stars, gap = op.stars or 1, Gap(op)
     if stars >= 3 then
@@ -85,6 +86,12 @@ ForeverQuantVerdict = Verdict       -- 给测试用
 local VERDICT_TEXT = { buy = "|cff40ff40买|r", hesitate = "|cffffd040犹豫|r", look = "|cff55ccff值得看|r", skip = "|cff808080-|r" }
 
 local function MarkKey(op) return op.item_id .. ":" .. (op.suffix_id or 0) end
+-- 标注存的是：「要」连同当时的差价倍数 { want = true, gap = 3.2 }；「不要」是 "no"。老版本存的 "want" 没有倍数，当作 0（任何差价都要）。
+local function MarkOf(m)
+    if type(m) == "table" then return "want", m.gap or 0 end
+    if m == "want" then return "want", 0 end
+    return m, nil
+end
 local function ApplyMarks(list)
     if not ForeverQuantDB or not list then return list end
     local marks = ForeverQuantDB.marks or {}
@@ -101,8 +108,9 @@ local function ApplyMarks(list)
                 ilvl = (op.ikey and op.ikey.itemLevel) or (old and old.ilvl), id = op.item_id, name = op.name, t = time() }
         end
         if op.model_stars == nil then op.model_stars, op.model_verified = op.stars or 1, op.verified end
-        local m = marks[MarkKey(op)]
-        if m == "want" then op.stars, op.verified, op.marked = 3, true, "want"
+        local m, wantGap = MarkOf(marks[MarkKey(op)])
+        op.wantGap = wantGap
+        if m == "want" then op.stars, op.verified, op.marked = op.model_stars, op.model_verified, "want"      -- 星级照模型的，不改
         elseif m == "no" then op.stars, op.verified, op.marked = 0, false, "no"
         else op.stars, op.verified, op.marked = op.model_stars, op.model_verified, nil end
         if m == "no" then drop[#drop + 1] = op else keep[#keep + 1] = op end
@@ -115,11 +123,15 @@ local function SetMark(op, want)
     ForeverQuantDB.marks = ForeverQuantDB.marks or {}
     ForeverQuantDB.corrections = ForeverQuantDB.corrections or {}
     local k = MarkKey(op)
-    local new = want and "want" or "no"
-    if ForeverQuantDB.marks[k] == new then new = nil end   -- 再点一次同一个 = 取消标注
+    local old = MarkOf(ForeverQuantDB.marks[k])
+    local kind = want and "want" or "no"
+    local new = nil
+    if old ~= kind then                                    -- 再点一次同一个 = 取消标注
+        new = want and { want = true, gap = math.floor(Gap(op) * 10) / 10, t = time() } or "no"
+    end
     ForeverQuantDB.marks[k] = new
     local clean = function(t) return (string.gsub(tostring(t or ""), "|", "/")) end
-    table.insert(ForeverQuantDB.corrections, table.concat({ "#MARK", time(), new or "clear", op.item_id, op.suffix_id or 0,
+    table.insert(ForeverQuantDB.corrections, table.concat({ "#MARK", time(), (new == nil and "clear") or kind, op.item_id, op.suffix_id or 0,
         clean(op.name), op.model_stars or op.stars or 1, op.model_verified and 1 or 0, op.max_unit_price or 0,
         op.target_unit_price or 0, clean(op.reason) }, "|"))
 end
@@ -200,6 +212,7 @@ end
 
 -- 每个页签：列定义 {标题, x, 宽, 取值函数}
 local fishRows = {}        -- 钓鱼页的行，内容在后面的 BuildFishRows 里填
+local bizRows = {}         -- 经营总览页的行
 local ledgerRows = {}      -- 账本页的行，内容在后面的 BuildLedgerRows 里填
 local todRows = (ForeverQuantRecommendations and ForeverQuantRecommendations.tod and ForeverQuantRecommendations.tod.items) or {}
 local function Dur(sec)    -- 时长：分钟 / 小时 / 天
@@ -222,7 +235,10 @@ local VIEWS = {
             { "净赚(估)", 404, 64, function(op) return Silver(op.expected_profit) end },
             { "差价", 472, 50, function(op)
                 local g = Gap(op)
-                return (g >= GAP_BIG and "|cff40ff40" or (g >= GAP_OK and "|cffffffff" or "|cffff8040")) .. string.format("%.1f倍|r", g) end },
+                -- 用装备品质的配色：灰 < 1.5 倍，白 < 2.5，绿 < 3，蓝 < 6，紫 < 10，橙 10 倍以上
+                local c = (g >= 10 and "ff8000") or (g >= 6 and "a335ee") or (g >= GAP_BIG and "0070dd") or (g >= GAP_OK and "1eff00")
+                    or (g >= 1.5 and "ffffff") or "9d9d9d"
+                return "|cff" .. c .. string.format("%.1f倍|r", g) end },
             { "星级", 526, 50, function(op) return Stars(op.stars) end },
             { "建议", 580, 50, function(op) return VERDICT_TEXT[Verdict(op)] end },
             { "理由", 634, 230, function(op) return op.reason or "" end },
@@ -261,7 +277,7 @@ local VIEWS = {
             { "买入", 246, 70, function(r) return r.cost and Silver(r.cost) or "|cff808080?|r" end },
             { "卖出价", 320, 70, function(r) return r.price and Silver(r.price) or "-" end },
             { "净赚", 394, 80, function(r)
-                if r.status ~= "sold" then return "-" end
+                if r.status ~= "sold" and r.status ~= "vendor" then return "-" end
                 if not r.cost then return "|cff808080缺买入价|r" end
                 return (r.net >= 0 and "|cff40ff40+|r" or "") .. Silver(r.net) end },
             { "多久卖掉", 478, 90, function(r) return r.status == "sold" and Dur(r.took) or (r.status == "open" and ("已挂 " .. Dur(time() - r.posted)) or "-") end },
@@ -271,7 +287,42 @@ local VIEWS = {
                 if r.status == "open" then return "|cffffd040在售|r" end
                 if r.status == "expired" then return "|cffff6060流拍|r" end
                 if r.status == "cancelled" then return "|cffaaaaaa已撤单|r" end
+                if r.status == "used" then return "|cffaaaaaa自用（不卖了）|r" end
+                if r.status == "restocked" then return "|cffaaaaaa自用后又拿出来卖|r" end
+                if r.status == "vendor" then return "|cffaaaaaa卖店|r" end
+                for _, h in ipairs((ForeverQuantDB and ForeverQuantDB.holdings) or {}) do
+                    if h.name == r.name then
+                        if h.vendor then return "|cffff8040该卖店了（挂不动）|r" end
+                        local re = (h.relist or 0) > 0 and string.format("，流拍 %d 次", h.relist) or ""
+                        return string.format("|cffffd040待上架%s%s|r", h.post and (" " .. SilverText(h.post)) or "", re)
+                    end
+                end
                 return "|cffaaaaaa只买未挂|r" end },
+        },
+    },
+    -- 蓝色武器：一共就一百来把，一把一把看它自己的价格（进货线 / 平时最低 / 高位 / 走货速度），不看后缀
+    blue = {
+        list = function() return data.blueRows or {} end,       -- 表还在建，这里引用不到 VIEWS 自己，所以行存在 data 上
+        cols = {
+            { "蓝色武器", 12, 170, function(r) return ItemLink(r.item_id) or ("|cff0070dd[" .. r.name .. "]|r") end },
+            { "类型", 186, 50, function(r) return r.kind end },
+            { "需求", 240, 34, function(r) return r.req end },
+            { "现价", 278, 76, function(r) return r.now > 0 and Silver(r.now) or "|cff808080没货|r" end },
+            { "进货线", 358, 76, function(r) return Silver(r.low) end },
+            { "平时最低", 438, 76, function(r) return Silver(r.typ) .. (r.recent < r.typ * 0.85 and " |cffff6060↓|r" or (r.recent > r.typ * 1.15 and " |cff40ff40↑|r" or "")) end },
+            { "高位", 518, 76, function(r) return Silver(r.high) end },
+            { "日销", 598, 40, function(r) return string.format("%.0f", r.spd) end },
+            { "结论", 642, 110, function(r) return r.verdictText end },
+            { "进了能赚", 756, 90, function(r) return r.net > 0 and Silver(r.net) or "-" end },
+        },
+    },
+    biz = {
+        list = function() return bizRows end,
+        cols = {
+            { "项目", 12, 250, function(r) return r.label end },
+            { "今天", 270, 110, function(r) return r.a end },
+            { "累计 / 现在", 386, 110, function(r) return r.b end },
+            { "说明", 502, 360, function(r) return r.note end },
         },
     },
     tod = {
@@ -479,16 +530,19 @@ local function MakeButton(text, x, w, onClick, y)
     return b
 end
 -- 三个场景：钓鱼 / 分解（套利名单 + 监控）/ 交易（绿装 + 配方）。场景里再分小页签。
-local SCENE = { fish = "fish", de = "de", watch = "de", gear = "trade", recipe = "trade", ledger = "trade", tod = "trade" }
+local SCENE = { fish = "fish", de = "de", watch = "de", gear = "trade", recipe = "trade", ledger = "trade", tod = "trade", biz = "trade", blue = "trade" }
 local lastMode = { fish = "fish", de = "de", trade = "gear" }
 local function Go(m) mode, offset = m, 0; lastMode[SCENE[m]] = m; Refresh() end
+ForeverQuantDebugGo = Go          -- 给测试用：逐个页签刷一遍，确认打开不报错
 local sceneFish = MakeTab("蹲点钓鱼", 10, 110, function() Go(lastMode.fish) end, ROW1, true)
 local sceneDe = MakeTab("分解套利", 124, 110, function() Go(lastMode.de) end, ROW1, true)
 local sceneTrade = MakeTab("倒卖套利", 238, 110, function() Go(lastMode.trade) end, ROW1, true)
-local tabGear = MakeTab("", 10, 120, function() Go("gear") end)
-local tabRecipe = MakeTab("", 134, 120, function() Go("recipe") end)
-local tabLedger = MakeTab("买卖记录", 258, 90, function() Go("ledger") end)
-local tabTod = MakeTab("各时段价格", 352, 96, function() Go("tod") end)
+local tabGear = MakeTab("", 10, 110, function() Go("gear") end)
+VIEWS.blue.tab = MakeTab("蓝色武器", 122, 84, function() Go("blue") end)
+local tabRecipe = MakeTab("", 208, 110, function() Go("recipe") end)
+local tabLedger = MakeTab("买卖记录", 320, 80, function() Go("ledger") end)
+local tabTod = MakeTab("各时段价格", 402, 92, function() Go("tod") end)
+local tabBiz = MakeTab("经营总览", 496, 80, function() Go("biz") end)
 local btnAll = StyleToggle(CreateFrame("Button", nil, frame))
 btnAll:SetSize(140, 20); btnAll:SetPoint("BOTTOMRIGHT", -400, 8)
 btnAll:SetScript("OnClick", function()
@@ -507,6 +561,16 @@ btnSell:SetScript("OnEnter", function(self)
     GameTooltip:Show()
 end)
 btnSell:SetScript("OnLeave", function() GameTooltip:Hide() end)
+-- 待上架里有些货其实不卖了（自己穿、送人、分解……）：一键清掉，不再等它们上架；账上记成"自用"，不再算压货
+local btnClear = MakeButton("清空待上架", 404, 120, function() ForeverQuantModes.ClearPending() end, ROW1)
+btnClear:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+    GameTooltip:AddLine("清空待上架", 0.33, 0.8, 1)
+    GameTooltip:AddLine("把等着上架的货全部从名单里拿掉：不再自动上架它们，买卖记录里记成「自用」，经营总览不再把它们算作压着的货。", 1, 1, 1, true)
+    GameTooltip:AddLine("只是清名单，不会动背包里的东西。以后想卖其中某件，点「上架背包里的货」会重新认出来。", 0.7, 0.7, 0.7, true)
+    GameTooltip:Show()
+end)
+btnClear:SetScript("OnLeave", function() GameTooltip:Hide() end)
 local tabDe = MakeTab("", 10, 150, function() Go("de") end)
 local tabWatch = MakeTab("", 164, 150, function() Go("watch") end)
 -- 把一批新价格（{物品ID = {price, qty}}）套到监控项上并重算结论
@@ -625,14 +689,26 @@ local SWEEP_EVERY = 60           -- 全量绿装扫描隔多久做一次（秒�
 local lastSweepAt = nil
 local knownKeys = nil              -- 上一轮的候选，用来标"新"
 
-local function RuleKey(classID, subclassID, equipLoc)
+local RuleKey
+do
+local WEAPON_KEY = { [15] = "weapon_dagger", [7] = "weapon_sword1h", [4] = "weapon_mace1h", [0] = "weapon_axe1h", [13] = "weapon_fist",
+    [1] = "weapon_2h", [8] = "weapon_2h", [6] = "weapon_2h", [5] = "weapon_mace2h", [10] = "weapon_staff",
+    [2] = "weapon_ranged", [3] = "weapon_ranged", [18] = "weapon_ranged", [16] = "weapon_ranged", [19] = "weapon_wand" }
+local WEAPON_NAME = { weapon_dagger = "匕首", weapon_sword1h = "单手剑", weapon_mace1h = "单手锤", weapon_axe1h = "单手斧", weapon_fist = "拳套",
+    weapon_2h = "双手剑/斧/长柄", weapon_mace2h = "双手锤", weapon_staff = "法杖", weapon_ranged = "弓/枪/弩", weapon_wand = "魔杖" }
+function RuleKey(classID, subclassID, equipLoc)
     if equipLoc == "INVTYPE_CLOAK" or equipLoc == "INVTYPE_FINGER" or equipLoc == "INVTYPE_NECK" then return "jewelry_cloak", "首饰/披风" end
-    if classID == 2 then return "weapon", "武器" end
+    if classID == 2 then                                   -- 武器按类型分规则（和电脑端 gear.py 的 WEAPON_KEY 一致）
+        local k = WEAPON_KEY[subclassID]
+        if k and RULE and RULE.hot and RULE.hot[k] then return k, WEAPON_NAME[k] end
+        return "weapon", "武器"
+    end
     if classID == 4 then
         if subclassID == 1 then return "cloth", "布甲" end
         if subclassID == 2 then return "leather", "皮甲" end
         if subclassID == 3 then return "mail", "锁甲" end
     end
+end
 end
 
 local function Median(sorted)
@@ -990,7 +1066,7 @@ local function LiveRefresh(quiet)
         local T = ForeverQuantTrade
         if T then                      -- 你标过「要」的，重扫后又出现新挂单：直接去买（同一条挂单只买一次）
             for _, op in ipairs(gearAll) do
-                if op.marked == "want" and op.ikey and not (op.key and T.done[op.key]) then T.BuyNow(op) end
+                if op.marked == "want" and Verdict(op) == "buy" and op.ikey and not (op.key and T.done[op.key]) then T.BuyNow(op) end
             end
             T.wantAfterScan = nil
         end
@@ -1076,7 +1152,8 @@ autoFrame:SetScript("OnUpdate", function(_, elapsed)
             local P, T, txt = ForeverQuantPool, ForeverQuantTrade, nil
             if not ahOpen then txt = "未开拍卖行"
             elseif ForeverQuantScan.running then txt = "全量"
-            elseif P and P.Busy() then txt = string.format("快扫 %d/%d", P.n - #P.queue, P.n)
+            elseif P and P.fav then txt = "快扫 批量"
+            elseif P and P.Busy() then txt = string.format("快扫 细查剩%d", #P.queue)
             elseif ForeverQuantPeer and ForeverQuantPeer.Busy() then txt = "查同款"
             elseif T and (T.state ~= "idle" or #T.queue > 0) then txt = "买入中"
             else txt = string.format("%d秒", left) end
@@ -1121,14 +1198,14 @@ function Refresh()
         online and "|cff40ff40已连上|r" or (A and A.key and "|cffff6060没连上（自动功能都不会动）|r" or "|cffaaaaaa没有可用的按键|r")))
     tabGear:SetText(string.format("绿装捡漏 (%d)", #gearBudget))
     tabRecipe:SetText(string.format("配方转卖 (%d)", #recipes))
-    tabLedger:SetEnabled(mode ~= "ledger"); tabTod:SetEnabled(mode ~= "tod")
+    tabLedger:SetEnabled(mode ~= "ledger"); tabTod:SetEnabled(mode ~= "tod"); tabBiz:SetEnabled(mode ~= "biz"); VIEWS.blue.tab:SetEnabled(mode ~= "blue")
     tabDe:SetText(string.format("今天划算的 (%d)", #deList))
     tabWatch:SetText(string.format("我常分解的 (%d)", #watches))
     tabGear:SetEnabled(mode ~= "gear"); tabRecipe:SetEnabled(mode ~= "recipe"); tabDe:SetEnabled(mode ~= "de")
     tabWatch:SetEnabled(mode ~= "watch")
     local scene = SCENE[mode]
     sceneFish:SetEnabled(scene ~= "fish"); sceneDe:SetEnabled(scene ~= "de"); sceneTrade:SetEnabled(scene ~= "trade")
-    for b, sc in pairs({ [tabGear] = "trade", [tabRecipe] = "trade", [tabLedger] = "trade", [tabTod] = "trade", [tabDe] = "de", [tabWatch] = "de" }) do
+    for b, sc in pairs({ [tabGear] = "trade", [tabRecipe] = "trade", [tabLedger] = "trade", [tabTod] = "trade", [tabBiz] = "trade", [VIEWS.blue.tab] = "trade", [tabDe] = "de", [tabWatch] = "de" }) do
         if sc == scene then b:Show() else b:Hide() end
     end
     -- 各场景自己的开关只在自己的页签里出现
@@ -1144,8 +1221,10 @@ function Refresh()
         if ForeverQuantModes.SellState then text, can = ForeverQuantModes.SellState() end
         btnSell:SetText(text); btnSell:SetEnabled(can)
         btnSell:Show()
+        local n = #((ForeverQuantDB and ForeverQuantDB.holdings) or {})
+        if n > 0 then btnClear:SetText(string.format("清空待上架 (%d)", n)); btnClear:Show() else btnClear:Hide() end
     else
-        btnSell:Hide()
+        btnSell:Hide(); btnClear:Hide()
     end
     if mode == "watch" then btnWatch:Show() else btnWatch:Hide() end
     if mode == "gear" then
@@ -1161,6 +1240,45 @@ function Refresh()
             sum.sold, SilverText(sum.net), sum.noCost, sum.sold > 0 and Dur(sum.avgTook) or "-", sum.open, sum.expired,
             sum.bestHour and string.format(" · 卖出最多的时段 %02d 点（%d 笔）", sum.bestHour, sum.bestHourN) or ""))
         foot:SetText("买入和上架从接口上记，卖出和流拍靠系统消息；你不在线时卖掉的要等上线后收到消息才记上。")
+    elseif mode == "blue" then
+        btnLive:Hide()
+        local B = data.blue
+        local ORDER = { ["可以进"] = 1, ["可以进（走得慢）"] = 2, ["偏低"] = 3, ["等"] = 4, ["在跌，先别进"] = 5, ["高位（出货）"] = 6, ["没货"] = 7 }
+        local COLOR = { ["可以进"] = "|cff40ff40", ["可以进（走得慢）"] = "|cffa0e0a0", ["偏低"] = "|cffffffff", ["等"] = "|cff808080",
+                        ["在跌，先别进"] = "|cffff8040", ["高位（出货）"] = "|cff55ccff", ["没货"] = "|cff808080" }
+        local out, n, live = {}, 0, 0
+        for _, r in ipairs(B and B.items or {}) do
+            -- 现价：游戏里做过全量扫描就用扫到的（没扫到 = 现在没货），否则用电脑端分析时的
+            local scanned = next(livePrices) ~= nil
+            r.now = scanned and (livePrices[r.item_id] or 0) or r.cur
+            if scanned then live = live + 1 end
+            local ref = math.min(r.typ, r.recent or r.typ)        -- 在跌的货按最近一天的价估，不按一周前的
+            r.net = math.floor(ref * (1 - AH_CUT)) - r.now
+            local v
+            if r.now <= 0 then v, r.net = "没货", 0
+            elseif r.now <= r.low and r.net >= r.now * 0.15 then v = (r.spd >= 2) and "可以进" or "可以进（走得慢）"
+            elseif (r.recent or r.typ) < r.typ * 0.85 then v = "在跌，先别进"
+            elseif r.net >= r.now * 0.15 then v = "偏低"
+            elseif r.now >= r.high then v = "高位（出货）"
+            else v = "等" end
+            r.verdict, r.verdictText = v, COLOR[v] .. v .. "|r"
+            if ORDER[v] <= 2 then n = n + 1 end
+            out[#out + 1] = r
+        end
+        table.sort(out, function(a, b)
+            if ORDER[a.verdict] ~= ORDER[b.verdict] then return ORDER[a.verdict] < ORDER[b.verdict] end
+            return a.net * math.min(a.spd, 5) > b.net * math.min(b.spd, 5)
+        end)
+        data.blueRows = out; list = out
+        sub:SetText(B and string.format("40 级以下蓝色武器 %d 把，现在可以进的 %d 把 · 价格画像 %s · 现价%s · 进货线 = 一周最低价的下四分位；↓ = 最近一天在跌",
+            #out, n, Age(B.at), live > 0 and "来自游戏内扫描" or "来自电脑端（先点「扫描整个拍卖行」更准）")
+            or "还没有蓝色武器的数据：电脑端下次分析时生成（或运行 python3 -m quant blue）。需要本机装了 DungeonsForeverGear 插件。")
+    elseif mode == "biz" then
+        btnLive:Hide()
+        local S
+        bizRows, S = ForeverQuantLedger.BizRows(); list = bizRows
+        sub:SetText(string.format("资产 %s = 现金 %s + 货 %s + 没到账的货款 %s + 押金 %s · 只统计买卖记录里记到的",
+            SilverText(S.assets), SilverText(S.cash), SilverText(S.stock), SilverText(S.transit), SilverText(S.depHeld)))
     elseif mode == "tod" then
         btnLive:Hide()
         local t = data.tod
@@ -1201,7 +1319,8 @@ function Refresh()
     else
         btnLive:Hide()
         local P = ForeverQuantPool
-        local quick = (P and P.doneAt) and string.format(" · 快扫 %d 秒前（%d 件，用时 %d 秒%s）", GetTime() - P.doneAt, P.n, P.took or 0,
+        local quick = (P and P.doneAt) and string.format(" · 快扫 %d 秒前（%s %d 件%s，细查 %d，用时 %d 秒%s）", GetTime() - P.doneAt, P.how or "", P.n,
+            P.how == "偏好批量" and ("、有货 " .. (P.favSeen or 0) .. ((P.over or 0) > 0 and ("、偏好位外 " .. P.over) or "")) or "", P.detail or 0, P.took or 0,
             (P.timeouts or 0) > 0 and ("，" .. P.timeouts .. " 件没回应") or "") or ""
         sub:SetText(string.format("全量%s%s · %s %d 条 · 鼠标放到行上看依据",
             liveGearAt and (" " .. Age(liveGearAt)) or ("（电脑端）" .. Age(data.prices_at)), quick,
@@ -1241,8 +1360,10 @@ function Refresh()
                 r.nav:SetSize(60, ROW_H - 2); r.nav:SetPoint("TOPLEFT", WIDTH - 76, r.navY)
             end
             if mode == "gear" then
-                r.nav:SetText(op.marked == "want" and "|cff40ff40要|r" or (op.marked == "no" and "|cffff6060不要|r" or "|cff808080标|r"))
+                r.nav:SetText(op.marked == "want" and string.format("|cff40ff40要%.1f|r", op.wantGap or 0) or (op.marked == "no" and "|cffff6060不要|r" or "|cff808080标|r"))
                 r.nav:Show()
+            elseif mode == "ledger" and (op.status == "held" or op.status == "used") then
+                r.nav:SetText(op.status == "held" and "不卖了" or "|cff40ff40再上架|r"); r.nav:Show()
             elseif mode == "recipe" and op.vendors and #op.vendors > 0 then
                 r.nav:SetText("导航"); r.nav:Show()
             elseif mode == "fish" and op.kind == "fish" then
@@ -1287,7 +1408,7 @@ for i = 1, ROWS do
     r.nav:SetScript("OnEnter", function(self)
         if mode ~= "gear" then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:AddLine("左键：要（直接三星）", 0.25, 1, 0.25)
+        GameTooltip:AddLine("左键：要 —— 记下现在的差价倍数，这个倍数及以上的都买（星级不变）", 0.25, 1, 0.25)
         GameTooltip:AddLine("右键：不要（零星，沉到最后，不会自动买）", 1, 0.4, 0.4)
         GameTooltip:AddLine("再点一次同一个键取消。每次标注都会记一条校正记录。", 0.7, 0.7, 0.7, true)
         GameTooltip:Show()
@@ -1304,6 +1425,10 @@ for i = 1, ROWS do
             return
         end
         if button == "RightButton" then return end
+        if mode == "ledger" then
+            ForeverQuantModes.Relist(r.op)
+            return
+        end
         if mode == "watch" then
             StartAutoDE(r.op.item_id, r.op.name)       -- 正在跑的话就是停止
             return
@@ -1760,7 +1885,7 @@ end)
 -- 买：自动刷新发现高星候选 -> 逐条去查实时挂单 -> 价格没变就进入"待买" -> 你按一下键（或电脑端程序替你按）就买。
 -- 卖：买到的东西在邮箱里，取回后在拍卖行按一下键挂一件，价格自动用当时的目标价。
 -- 每次购买/上架都由一次按键触发，这是游戏对插件的硬性要求。
--- 保险：只买"已验证"的、星级够的；实时价格高于建议买价就跳过；有本次预算上限；每笔都记进存盘。
+-- 保险：只买"已验证"的、星级够的；实时价格高于建议买价就跳过；金币不够就跳过；每笔都记进存盘。（以前有个"本次预算"，开的时候定死、卖了货也不涨，已去掉）
 --------------------------------------------------------------------------------
 local Trade = { queue = {}, done = {}, state = "idle", spent = 0, on = false }
 local Pricing = { cur = nil, since = 0 }       -- 上架前查同款挂价（实现在上架那一段）
@@ -1803,7 +1928,7 @@ function Trade.Enqueue()            -- 把当前名单里够格的候选排进�
     return added
 end
 
--- 你标了「要」：插到队首马上去买，不管「自动买入」开没开。价格核对、金币和预算的保险照旧。
+-- 你标了「要」：插到队首马上去买，不管「自动买入」开没开。价格核对、金币够不够的保险照旧。
 function Trade.BuyNow(op)
     TradeCfg()
     if not op.ikey then
@@ -1816,7 +1941,6 @@ function Trade.BuyNow(op)
     end
     if not ForeverQuantAction.key then ForeverQuantAction.Bind() end
     Trade.key, Trade.keyIdx = ForeverQuantAction.key, ForeverQuantAction.keyIdx
-    if not Trade.on then Trade.budget = math.max(Trade.budget or 0, Trade.spent + math.floor(GetMoney() * 0.8)) end
     for i = #Trade.queue, 1, -1 do if Trade.queue[i] == op then table.remove(Trade.queue, i) end end
     if op.key then Trade.done[op.key] = true end
     table.insert(Trade.queue, 1, op)
@@ -1902,9 +2026,9 @@ local function PeerDone()           -- 一轮查完：按新的星级重排保�
     if frame:IsShown() then Refresh() end
 end
 
-local peerFrame, peerTick = CreateFrame("Frame"), 0
-pcall(peerFrame.RegisterEvent, peerFrame, "ITEM_SEARCH_RESULTS_UPDATED")
-peerFrame:SetScript("OnEvent", function()
+Peer.frame, Peer.tick = CreateFrame("Frame"), 0
+pcall(Peer.frame.RegisterEvent, Peer.frame, "ITEM_SEARCH_RESULTS_UPDATED")
+Peer.frame:SetScript("OnEvent", function()
     local op = Peer.cur
     if not op then return end
     local prices = {}
@@ -1925,17 +2049,17 @@ peerFrame:SetScript("OnEvent", function()
     end
     if #Peer.queue == 0 then PeerDone() end
 end)
-peerFrame:SetScript("OnUpdate", function(_, elapsed)
-    peerTick = peerTick + elapsed
-    if peerTick < 0.3 then return end
-    peerTick = 0
+Peer.frame:SetScript("OnUpdate", function(_, elapsed)
+    Peer.tick = Peer.tick + elapsed
+    if Peer.tick < 0.3 then return end
+    Peer.tick = 0
     if Peer.cur then
         if GetTime() - Peer.since > 6 then Peer.cur = nil; if #Peer.queue == 0 then PeerDone() end end      -- 查询超时：跳过这条
         return
     end
     if #Peer.queue == 0 then return end
     if not (AuctionHouseFrame and AuctionHouseFrame:IsShown()) then Peer.queue = {} return end
-    if ForeverQuantScan.running or Trade.state ~= "idle" or Pricing.cur or Pool.cur or not C_AuctionHouse.IsThrottledMessageSystemReady() then return end
+    if ForeverQuantScan.running or Trade.state ~= "idle" or Pricing.cur or Pool.cur or Pool.fav or not C_AuctionHouse.IsThrottledMessageSystemReady() then return end
     Peer.cur, Peer.since = table.remove(Peer.queue, 1), GetTime()
     if not pcall(C_AuctionHouse.SendSearchQuery, Peer.cur.ikey, {}, false) then Peer.cur = nil end
 end)
@@ -1946,28 +2070,143 @@ end)
 -- 全量扫描只隔一段时间做一次，用来发现新面孔和刷新参照价。
 --------------------------------------------------------------------------------
 local POOL_MIN_STARS, POOL_GAP, POOL_MIN_PROFIT = 2, 2.0, 1500        -- 进池的最低历史星级；目标价至少是现价的几倍；最低净赚（铜）
-function Pool.Busy() return Pool.cur ~= nil or #Pool.queue > 0 end
-function Pool.Build()               -- 返回这一轮要查的名单（三星在前）
+function Pool.Busy() return Pool.cur ~= nil or Pool.fav ~= nil or #Pool.queue > 0 end
+-- 卖出过几次（按名字）：每分钟最多重算一次
+function Pool.SoldCount()
+    if Pool.soldAt and GetTime() - Pool.soldAt < 60 then return Pool.sold end
+    local c, Lg = {}, ForeverQuantLedger
+    if Lg and Lg.Build then
+        Lg.Build()
+        for _, r in ipairs(Lg.rows or {}) do
+            if r.status == "sold" and r.name then c[r.name] = (c[r.name] or 0) + 1 end
+        end
+    end
+    Pool.sold, Pool.soldAt = c, GetTime()
+    return c
+end
+-- 返回这一轮要查的名单。偏好位有限，所以排序就是优先级：
+--   你标「要」的 > 真卖出去过的（卖得多的在前）> 差价绝对值大的（目标价 - 买价）
+function Pool.Build()
+    local sold = Pool.SoldCount()
     local list, marks = {}, ForeverQuantDB.marks or {}
     for _, kn in pairs(ForeverQuantDB.known or {}) do
         if kn.id and kn.name then
-            local mark = marks[kn.id .. ":" .. (kn.suffix or 0)]
+            local mark = MarkOf(marks[kn.id .. ":" .. (kn.suffix or 0)])
             local best = (mark == "want") and 4 or (kn.best or kn.stars or 1)
             if mark ~= "no" and best >= POOL_MIN_STARS and (kn.suffix or 0) ~= 0 then
                 local ilvl = kn.ilvl or select(4, ItemInfo(kn.id))
-                if ilvl then list[#list + 1] = { kn = kn, best = best, ilvl = ilvl } end
+                if ilvl then
+                    list[#list + 1] = { kn = kn, best = best, ilvl = ilvl, want = (mark == "want") and 1 or 0,
+                                        sold = sold[kn.name] or 0, margin = (kn.target or 0) - (kn.buy or 0) }
+                end
             end
         end
     end
-    table.sort(list, function(a, b) if a.best ~= b.best then return a.best > b.best end return (a.kn.t or 0) > (b.kn.t or 0) end)
+    table.sort(list, function(a, b)
+        if a.want ~= b.want then return a.want > b.want end
+        if a.sold ~= b.sold then return a.sold > b.sold end
+        if a.margin ~= b.margin then return a.margin > b.margin end
+        return a.kn.id < b.kn.id
+    end)
     return list
 end
 function Pool.Size() return #Pool.Build() end
+-- 批量查：把池里的物品设成拍卖行的"偏好"，一次查询拿回所有偏好物品的最低价；只有够便宜的才逐件细查（看同款挂价）。
+-- 只管自己设进去的偏好（记在存盘的 favSet 里），你手动收藏的不动；池子里放不进偏好的（满了）照旧逐件查。
+local function FavKey(id, suffix) return id .. ":" .. (suffix or 0) end
+local function FavUsable()
+    local A = C_AuctionHouse
+    if Pool.favBroken or not (A.SearchForFavorites and A.SetFavoriteItem and A.MakeItemKey) then return false end
+    if A.FavoritesAreAvailable and not A.FavoritesAreAvailable() then return false end
+    return true
+end
+local function FavSync(list)        -- 让"我设的偏好"和池子一致；返回没能放进偏好的条目
+    ForeverQuantDB.favSet = ForeverQuantDB.favSet or {}
+    local set, want, rest = ForeverQuantDB.favSet, {}, {}
+    local cap = ForeverQuantDB.favCap                      -- 偏好位能放几件：第一次碰到"满了"时记下来
+    for i, e in ipairs(list) do
+        if not cap or i <= cap then want[FavKey(e.kn.id, e.kn.suffix)] = e end      -- 只有排在前 cap 位的该占偏好位
+    end
+    for k, v in pairs(set) do                              -- 出了池子的：取消偏好
+        if not want[k] then
+            local ok, key = pcall(C_AuctionHouse.MakeItemKey, v.id, v.ilvl, v.suffix)
+            if ok and key then pcall(C_AuctionHouse.SetFavoriteItem, key, false) end
+            set[k] = nil
+        end
+    end
+    for i, e in ipairs(list) do
+        local k = FavKey(e.kn.id, e.kn.suffix)
+        if not set[k] then
+            local full = (cap and i > cap) or (C_AuctionHouse.HasMaxFavorites and C_AuctionHouse.HasMaxFavorites())
+            local ok, key = pcall(C_AuctionHouse.MakeItemKey, e.kn.id, e.ilvl, e.kn.suffix or 0)
+            if not full and ok and key and pcall(C_AuctionHouse.SetFavoriteItem, key, true) then
+                set[k] = { id = e.kn.id, ilvl = e.ilvl, suffix = e.kn.suffix or 0 }
+            else
+                if not cap and full then                    -- 第一次满：记下我们能占几个位，下一轮起按优先级腾位
+                    local n = 0
+                    for _ in pairs(set) do n = n + 1 end
+                    ForeverQuantDB.favCap = n
+                    cap = n
+                end
+                rest[#rest + 1] = e
+            end
+        end
+    end
+    return rest
+end
 function Pool.Start()
     if Pool.Busy() then return false end
-    Pool.queue, Pool.hits, Pool.timeouts, Pool.startedAt = Pool.Build(), 0, 0, GetTime()
-    Pool.n = #Pool.queue
-    return Pool.n > 0
+    local list = Pool.Build()
+    Pool.queue, Pool.hits, Pool.timeouts, Pool.startedAt, Pool.n, Pool.detail = {}, 0, 0, GetTime(), #list, 0
+    if Pool.n == 0 then return false end
+    if FavUsable() then
+        local rest = FavSync(list)
+        Pool.list, Pool.rest, Pool.how = list, rest, "偏好批量"
+        Pool.fav = { since = GetTime(), sent = false }     -- 查询在 OnUpdate 里发（要等限流放行）
+    else
+        Pool.queue, Pool.how, Pool.detail = list, "逐件", #list
+    end
+    return true
+end
+-- 偏好批量查的结果回来了：挑出够便宜的去细查
+function Pool.FavResults(results)
+    local low = {}
+    for _, r in ipairs(results or {}) do
+        local k = r.itemKey
+        if k and (r.minPrice or 0) > 0 then
+            local key = FavKey(k.itemID, k.itemSuffix or 0)
+            if not low[key] or r.minPrice < low[key] then low[key] = r.minPrice end
+        end
+    end
+    local seen = 0
+    for _ in pairs(low) do seen = seen + 1 end
+    Pool.favSeen = seen                                     -- 批量查回来了几件有货的；一直是 0 说明这条路不通
+    Pool.favEmpty = (seen == 0) and ((Pool.favEmpty or 0) + 1) or 0
+    if Pool.favEmpty >= 3 then
+        Pool.favBroken = true
+        print("|cff55ccffFQ|r 偏好批量查连着三轮什么都没返回，快扫改回逐件查。")
+    end
+    local q, inFav, over = {}, ForeverQuantDB.favSet or {}, {}
+    for _, e in ipairs(Pool.list or {}) do
+        local kn = e.kn
+        local key = FavKey(kn.id, kn.suffix)
+        local price = low[key]
+        if not inFav[key] then
+            over[#over + 1] = e                             -- 没进偏好的：下面轮流查
+        elseif Pool.favBroken then
+            q[#q + 1] = e                                   -- 刚判定批量不可靠：这一轮就全部逐件查
+        elseif price and price * POOL_GAP <= kn.target and math.floor(kn.target * (1 - AH_CUT)) - price >= POOL_MIN_PROFIT then
+            q[#q + 1] = e                                   -- 够便宜：细查同款
+        end
+    end
+    local TAKE = 6                                          -- 偏好位以外的，每轮轮流逐件查 6 件
+    Pool.rot = Pool.rot or 0
+    for i = 1, math.min(TAKE, #over) do q[#q + 1] = over[(Pool.rot + i - 1) % #over + 1] end
+    if #over > 0 then Pool.rot = (Pool.rot + TAKE) % #over end
+    Pool.over = #over
+    Pool.fav, Pool.list, Pool.rest = nil, nil, nil
+    Pool.queue, Pool.detail = q, #q
+    return q
 end
 -- 查到了某件池内装备现在的挂单（已按价格从低到高排好）：够便宜就做成一条候选
 function Pool.Judge(e, prices)
@@ -1991,7 +2230,7 @@ local function PoolDone()
     if Pool.hits > 0 then
         ApplyMarks(gearAll); ApplyMarks(gearBudget)
         for _, op in ipairs(gearAll) do
-            if op.marked == "want" and op.ikey and not (op.key and Trade.done[op.key]) then Trade.BuyNow(op) end
+            if op.marked == "want" and Verdict(op) == "buy" and op.ikey and not (op.key and Trade.done[op.key]) then Trade.BuyNow(op) end
         end
         if Trade.on then Trade.Enqueue() end
         print(string.format("|cff55ccffFQ|r |cff40ff40快扫发现 %d 条|r（查了池里 %d 件）。", Pool.hits, Pool.n))
@@ -2001,9 +2240,20 @@ local function PoolDone()
     Pool.took = Pool.doneAt - (Pool.startedAt or Pool.doneAt)
     if frame:IsShown() then Refresh() end
 end
-local poolFrame, poolTick = CreateFrame("Frame"), 0
-pcall(poolFrame.RegisterEvent, poolFrame, "ITEM_SEARCH_RESULTS_UPDATED")
-poolFrame:SetScript("OnEvent", function()
+Pool.frame, Pool.tick = CreateFrame("Frame"), 0
+pcall(Pool.frame.RegisterEvent, Pool.frame, "ITEM_SEARCH_RESULTS_UPDATED")
+pcall(Pool.frame.RegisterEvent, Pool.frame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+Pool.frame:SetScript("OnEvent", function(_, event)
+    if event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
+        if not (Pool.fav and Pool.fav.sent) or ForeverQuantScan.running then return end
+        if C_AuctionHouse.HasFullBrowseResults and not C_AuctionHouse.HasFullBrowseResults() then
+            pcall(C_AuctionHouse.RequestMoreBrowseResults)          -- 一页放不下：接着要，等下一次事件
+            return
+        end
+        Pool.favOk = true
+        if #Pool.FavResults(C_AuctionHouse.GetBrowseResults()) == 0 then PoolDone() end
+        return
+    end
     local e = Pool.cur
     if not e then return end
     local prices = {}
@@ -2021,14 +2271,33 @@ poolFrame:SetScript("OnEvent", function()
         table.insert(gearAll, 1, op)
         if gearBudget ~= gearAll then table.insert(gearBudget, 1, op) end
         ApplyMarks(gearAll); ApplyMarks(gearBudget)
-        if op.marked == "want" then Trade.BuyNow(op) elseif Trade.on then Trade.Enqueue() end      -- 不等这一轮查完，马上去买
+        if op.marked == "want" and Verdict(op) == "buy" then Trade.BuyNow(op) elseif Trade.on then Trade.Enqueue() end      -- 不等这一轮查完，马上去买
     end
     if #Pool.queue == 0 then PoolDone() end
 end)
-poolFrame:SetScript("OnUpdate", function(_, elapsed)
-    poolTick = poolTick + elapsed
-    if poolTick < 0.2 then return end
-    poolTick = 0
+Pool.frame:SetScript("OnUpdate", function(_, elapsed)
+    Pool.tick = Pool.tick + elapsed
+    if Pool.tick < 0.2 then return end
+    Pool.tick = 0
+    if Pool.fav then                                         -- 偏好批量查
+        local f = Pool.fav
+        if not (AuctionHouseFrame and AuctionHouseFrame:IsShown()) then Pool.fav, Pool.list = nil, nil return end
+        if not f.sent then
+            if ForeverQuantScan.running or Trade.state ~= "idle" or #Trade.queue > 0 or Peer.Busy() or Pricing.cur
+                or not C_AuctionHouse.IsThrottledMessageSystemReady() then return end
+            f.sent, f.since = true, GetTime()
+            if not pcall(C_AuctionHouse.SearchForFavorites, {}) then f.since = 0 end
+        elseif GetTime() - f.since > 6 then                 -- 没回应：这一轮退回逐件查；连着两次都这样就整场不再用偏好
+            Pool.favFails = (Pool.favFails or 0) + 1
+            if Pool.favFails >= 2 and not Pool.favOk then
+                Pool.favBroken = true
+                print("|cff55ccffFQ|r 偏好批量查没有回应，快扫改回逐件查。")
+            end
+            Pool.queue, Pool.how, Pool.detail = Pool.list or {}, "逐件", #(Pool.list or {})
+            Pool.fav, Pool.list = nil, nil
+        end
+        return
+    end
     if Pool.cur then
         if GetTime() - Pool.since > 3 then                  -- 没回应：记一笔，跳过
             Pool.cur, Pool.timeouts = nil, (Pool.timeouts or 0) + 1
@@ -2071,7 +2340,6 @@ tradeFrame:SetScript("OnEvent", function(_, event)
         return TradeSkip(string.format("现在最低 %s，高于建议买价 %s", SilverText(best.buyoutAmount), SilverText(op.max_unit_price)))
     end
     if best.buyoutAmount > GetMoney() then return TradeSkip("金币不够") end
-    if Trade.spent + best.buyoutAmount > (Trade.budget or 0) then return TradeSkip("超过本次预算") end
     Trade.ready = { op = op, auctionID = best.auctionID, price = best.buyoutAmount }
     Trade.state = "ready"
     print(string.format("|cff55ccffFQ|r |cff40ff40待买|r %s %s  %s → 目标 %s。按 %s 买入。", Stars(op.stars), op.name or "?",
@@ -2089,7 +2357,7 @@ tradeFrame:SetScript("OnUpdate", function(_, elapsed)
     local now = GetTime()
     if Trade.state == "idle" then
         if #Trade.queue > 0 and AuctionHouseFrame and AuctionHouseFrame:IsShown() and not ForeverQuantScan.running
-            and not Pricing.cur and not Pool.cur and not Peer.Busy()        -- 先等同款印证查完，免得买到"同款都只值这个价"的
+            and not Pricing.cur and not Pool.cur and not Pool.fav and not Peer.Busy()        -- 先等同款印证查完，免得买到"同款都只值这个价"的
             and C_AuctionHouse.IsThrottledMessageSystemReady() then
             Trade.cur = table.remove(Trade.queue, 1)
             Trade.state, Trade.since = "searching", now
@@ -2108,8 +2376,8 @@ tradeFrame:SetScript("OnUpdate", function(_, elapsed)
                         target = r.op.target_unit_price, t = time() }
             table.insert(ForeverQuantDB.holdings, h)
             TLog("BUY", r.op, r.price)
-            print(string.format("|cff55ccffFQ|r |cff40ff40买到|r %s，花了 %s；本次已花 %s / 预算 %s。东西在邮箱里。",
-                r.op.name or "?", SilverText(r.price), SilverText(Trade.spent), SilverText(Trade.budget)))
+            print(string.format("|cff55ccffFQ|r |cff40ff40买到|r %s，花了 %s；这次开着以来共花 %s。东西在邮箱里。",
+                r.op.name or "?", SilverText(r.price), SilverText(Trade.spent)))
             Trade.cur, Trade.ready, Trade.state = nil, nil, "idle"
             if frame:IsShown() then Refresh() end
         elseif now - Trade.since > 6 then
@@ -2181,7 +2449,19 @@ function Trade.Adopt(quiet)
                     have[k] = have[k] - 1                   -- 这一件已经在待上架名单里了
                 else
                     n = n + 1
-                    Trade.AddHolding(id, kn.suffix, name, kn.buy, kn.target)
+                    local cost = kn.buy
+                    local Lg = ForeverQuantLedger
+                    if Lg and Lg.Build then                      -- 之前清成"自用"的又拿出来卖：按当时的买入成本记回去
+                        Lg.Build()
+                        for _, r in ipairs(Lg.rows or {}) do
+                            if r.status == "used" and r.name == name then
+                                cost = r.cost or cost
+                                Lg.Add("RESTOCK", id, 0, 1, cost, name)
+                                break
+                            end
+                        end
+                    end
+                    Trade.AddHolding(id, kn.suffix, name, cost, kn.target)
                 end
             end
         end
@@ -2213,6 +2493,26 @@ local function PriceDecide(h, prices)
             post, why = cand, string.format("同款 %d 件，最低 %s", n, SilverText(low))
         end
     end
+    -- 流拍后重新挂的：上次那个价没卖掉，这次要打折。每流拍一次降一成，一路降下去，不守成本；
+    -- 同款有两件以上时跟市场价（哪怕低于成本）。降到"拍卖行到手还不如卖商店"时，就不再挂了，改成建议卖店。
+    if (h.relist or 0) > 0 then
+        local vendor = select(11, ItemInfo(h.item_id)) or 0
+        local cut = math.floor(h.target * (0.9 ^ h.relist) / 100) * 100
+        if low and n >= 2 then
+            post, why = math.min(Undercut(low), h.target), string.format("同款 %d 件，最低 %s", n, SilverText(low))      -- 跟市场，但不比上次挂得高
+        else
+            post, why = cut, low and string.format("只有 1 件同款挂 %s，不参考", SilverText(low)) or "没有同款在售"
+        end
+        post = math.min(post, cut > 0 and math.max(cut, post) or post)
+        why = why .. string.format("；流拍过 %d 次（上次挂 %s）", h.relist, SilverText(h.target))
+        if post <= 0 or math.floor(post * (1 - AH_CUT)) <= vendor then
+            h.vendor, h.fail = true, 9                          -- fail >= 2 的不会再被自动上架
+            h.post, h.priced_at = nil, time()
+            print(string.format("|cff55ccffFQ|r %s 流拍 %d 次，再降就不如卖商店了（商店收 %s）。不再上架，带去商人那里卖掉就行，账上会自动记。",
+                h.name or "?", h.relist, SilverText(vendor)))
+            return
+        end
+    end
     local changed = h.post ~= post
     h.post, h.priced_at = post, time()
     if changed then print(string.format("|cff55ccffFQ|r 定价 %s：%s → 挂 %s（原目标 %s，买入 %s）", h.name or "?", why, SilverText(post), SilverText(h.target), SilverText(h.cost))) end
@@ -2228,14 +2528,14 @@ local function PriceReady(h)        -- 这件有新鲜的定价了吗？没有�
     if not bag then return false end
     local ok, key = pcall(C_AuctionHouse.GetItemKeyFromItem, ItemLocation:CreateFromBagAndSlot(bag, slot))
     if not ok or not key then h.post, h.priced_at = h.target, time() return true end      -- 查不了就用原目标价
-    if ForeverQuantScan.running or Trade.state ~= "idle" or ForeverQuantPeer.cur or Pool.cur or not C_AuctionHouse.IsThrottledMessageSystemReady() then return false end
+    if ForeverQuantScan.running or Trade.state ~= "idle" or ForeverQuantPeer.cur or Pool.cur or Pool.fav or not C_AuctionHouse.IsThrottledMessageSystemReady() then return false end
     Pricing.cur, Pricing.since = { h = h, key = key }, GetTime()
     if not pcall(C_AuctionHouse.SendSearchQuery, key, {}, false) then Pricing.cur = nil; h.post, h.priced_at = h.target, time() return true end
     return false
 end
-local pricingFrame = CreateFrame("Frame")
-pcall(pricingFrame.RegisterEvent, pricingFrame, "ITEM_SEARCH_RESULTS_UPDATED")
-pricingFrame:SetScript("OnEvent", function()
+Pricing.frame = CreateFrame("Frame")
+pcall(Pricing.frame.RegisterEvent, Pricing.frame, "ITEM_SEARCH_RESULTS_UPDATED")
+Pricing.frame:SetScript("OnEvent", function()
     local c = Pricing.cur
     if not c then return end
     local prices = {}
@@ -2249,7 +2549,7 @@ pricingFrame:SetScript("OnEvent", function()
     Pricing.cur = nil
     PriceDecide(c.h, prices)
 end)
-pricingFrame:SetScript("OnUpdate", function()
+Pricing.frame:SetScript("OnUpdate", function()
     local c = Pricing.cur
     if c and GetTime() - Pricing.since > 6 then          -- 查询没回来：按"没有同款"处理
         Pricing.cur = nil
@@ -2332,6 +2632,22 @@ postFrame:SetScript("OnUpdate", function(_, elapsed)
         end
         return
     end
+    if MerchantFrame and MerchantFrame:IsShown() then
+        for i = #holdings, 1, -1 do
+            local h = holdings[i]
+            if h.vendor then
+                local inBag = FindInBags(h.item_id, h.suffix_id, h.name) ~= nil
+                if h.wasInBag and not inBag then
+                    local vendor = select(11, ItemInfo(h.item_id)) or 0
+                    ForeverQuantLedger.Add("VENDOR", h.item_id, 0, 1, vendor, h.name)
+                    table.remove(holdings, i)
+                    print(string.format("|cff55ccffFQ|r %s 卖给商人了，收回 %s（买入 %s）。", h.name or "?", SilverText(vendor), SilverText(h.cost or 0)))
+                else
+                    h.wasInBag = inBag
+                end
+            end
+        end
+    end
     -- 后台定价：拍卖行开着、背包里有待上架的货，就主动把价查好（不用你点），按钮跟着变
     if AuctionHouseFrame and AuctionHouseFrame:IsShown() then
         for _, h in ipairs(holdings) do
@@ -2407,10 +2723,9 @@ function Trade.Toggle(arg)
     Action.Bind()
     Trade.key, Trade.keyIdx = Action.key, Action.keyIdx
     Trade.spent = 0
-    Trade.budget = math.floor(GetMoney() * 0.8)
     local n = Trade.Enqueue()
-    print(string.format("|cff55ccffFQ|r 自动买入已开启：只买「建议」一栏是「买」的，本次预算 %s（手头金币的八成）。动作键 %s（买入和上架都是它）。当前排队 %d 条。",
-        SilverText(Trade.budget), Trade.key or "未绑定", n))
+    print(string.format("|cff55ccffFQ|r 自动买入已开启：只买「建议」一栏是「买」的；没有花费上限，金币够就买。动作键 %s（买入和上架都是它）。当前排队 %d 条。",
+        Trade.key or "未绑定", n))
     if not Trade.key then print("|cff55ccffFQ|r 没有空闲的键可以绑定买入，请在按键设置里手动绑定。") end
 end
 
@@ -2438,6 +2753,7 @@ local function LAdd(kind, id, suffix, qty, total, name, extra)
     if frame:IsShown() and mode == "ledger" then Refresh() end
 end
 
+Ledger.Add = LAdd
 local pendingBuys = {}          -- 发出了购买请求、还没确认扣钱的
 local ledgerFrame = CreateFrame("Frame")
 pcall(function()
@@ -2458,7 +2774,7 @@ pcall(function()
         local id, suffix, name = ParseLink(link)
         local dep = 0
         pcall(function() dep = C_AuctionHouse.CalculateItemDeposit(item, duration, quantity or 1) or 0 end)
-        LAdd("POST", id, suffix, quantity or 1, buyout or bid or 0, name, "dep=" .. dep)
+        LAdd("POST", id, suffix, quantity or 1, buyout or bid or 0, name, "dep=" .. dep .. ",dur=" .. tostring(duration or 2))
     end)
 end)
 pcall(function()
@@ -2502,12 +2818,37 @@ end
 local SOLD_PAT, EXPIRED_PAT = MsgPattern(ERR_AUCTION_SOLD_S), MsgPattern(ERR_AUCTION_EXPIRED_S)
 pcall(ledgerFrame.RegisterEvent, ledgerFrame, "CHAT_MSG_SYSTEM")
 local function PlainName(n) return string.match(n, "%[(.-)%]") or n end       -- 消息里可能是带颜色的物品链接
+local SOLD_PATS = { SOLD_PAT, "^你拍卖的(.+)已经售出。?$", "^你的拍卖品(.+)已售出。?$", "^A buyer has been found for your auction of (.+)%.$" }
+local EXPIRED_PATS = { EXPIRED_PAT, "^你拍卖的(.+)已经过期。?$", "^你的拍卖品(.+)已过期。?$", "^Your auction of (.+) has expired%.$" }
+-- 流拍（到期没卖掉）的货会退回邮箱：记一笔，并把它放回待上架，回到背包后照常重新定价、重新挂
+function Ledger.Expired(name, note)
+    Ledger.Build()
+    local row
+    for i = #(Ledger.rows or {}), 1, -1 do                 -- 同名的取最早挂的那一件
+        local r = Ledger.rows[i]
+        if r.status == "open" and r.name == name then row = r break end
+    end
+    LAdd("EXPIRED", row and row.item_id or 0, 0, 1, 0, name, note)
+    if row and row.item_id and row.item_id ~= 0 then
+        local kn = ForeverQuantTrade.Known(row.item_id, name)
+        ForeverQuantTrade.AddHolding(row.item_id, kn and kn.suffix or 0, name, row.cost or 0, row.price or (kn and kn.target) or 0)
+        local n = 1                                        -- 这件东西（同名）之前流拍过几次
+        for _, r in ipairs(Ledger.rows or {}) do if r.status == "expired" and r.name == name then n = n + 1 end end
+        local hs = ForeverQuantDB.holdings
+        hs[#hs].relist = n
+        print(string.format("|cff55ccffFQ|r %s 到期没卖掉，已放回待上架（上次挂 %s）。去邮箱取回后会按同款重新定价再挂。", name, SilverText(row.price or 0)))
+    end
+end
 function Ledger.OnSystemMessage(msg)
     if type(msg) ~= "string" then return end
-    local name = SOLD_PAT and string.match(msg, SOLD_PAT)
-    if name then return LAdd("SOLD", 0, 0, 1, 0, PlainName(name)) end
-    name = EXPIRED_PAT and string.match(msg, EXPIRED_PAT)
-    if name then return LAdd("EXPIRED", 0, 0, 1, 0, PlainName(name)) end
+    for i = 1, 4 do
+        local name = SOLD_PATS[i] and string.match(msg, SOLD_PATS[i])
+        if name then return LAdd("SOLD", 0, 0, 1, 0, PlainName(name)) end
+    end
+    for i = 1, 4 do
+        local name = EXPIRED_PATS[i] and string.match(msg, EXPIRED_PATS[i])
+        if name then return Ledger.Expired(PlainName(name)) end
+    end
 end
 pcall(ledgerFrame.RegisterEvent, ledgerFrame, "OWNED_AUCTIONS_UPDATED")
 pcall(ledgerFrame.RegisterEvent, ledgerFrame, "AUCTION_HOUSE_SHOW")
@@ -2541,18 +2882,21 @@ function Ledger.Reconcile()
         end
     end
     Ledger.Build()
-    local n = 0
+    local n, expired = 0, {}
     for i = #(Ledger.rows or {}), 1, -1 do                                   -- rows 是新的在前，倒着走 = 先挂的先算
         local r = Ledger.rows[i]
         if r.status == "open" and r.name then
             if (active[r.name] or 0) > 0 then
                 active[r.name] = active[r.name] - 1
+            elseif time() - (r.posted or 0) >= (r.dur or 24) * 3600 - 300 then   -- 挂满了时长才不见的：是到期流拍，不是卖掉
+                expired[#expired + 1] = r.name
             elseif time() - (r.posted or 0) > 20 then                        -- 刚挂上的可能还没进列表
                 LAdd("SOLD", 0, 0, 1, 0, r.name, "补记")
                 n = n + 1
             end
         end
     end
+    for _, name in ipairs(expired) do Ledger.Expired(name, "补记") end
     if n > 0 then print(string.format("|cff55ccffFQ|r 买卖记录对账：补记了 %d 笔已卖出（卖出时间按现在算）。", n)) end
 end
 
@@ -2561,7 +2905,7 @@ function Ledger.Build()
     local lots, posts, out = {}, {}, {}
     local sum = { sold = 0, net = 0, noCost = 0, open = 0, expired = 0, tookSum = 0, hours = {} }
     for _, line in ipairs((ForeverQuantDB and ForeverQuantDB.ledger) or {}) do
-        local t, kind, id, suffix, qty, total, name = string.match(line, "^(%d+)|(%u+)|(%d+)|(%-?%d+)|(%d+)|(%d+)|([^|]*)")
+        local t, kind, id, suffix, qty, total, name, extra = string.match(line, "^(%d+)|(%u+)|(%d+)|(%-?%d+)|(%d+)|(%d+)|([^|]*)|?(.*)$")
         t, id, suffix, qty, total = tonumber(t), tonumber(id), tonumber(suffix), tonumber(qty), tonumber(total)
         if kind == "BUY" then
             local key = id .. ":" .. suffix
@@ -2580,10 +2924,38 @@ function Ledger.Build()
                     end
                 end
             end
-            local row = { name = name, item_id = id, suffix_id = suffix, qty = qty, price = total, cost = cost, posted = t, status = "open" }
+            local row = { name = name, item_id = id, suffix_id = suffix, qty = qty, price = total, cost = cost, posted = t, status = "open",
+                          dep = tonumber(string.match(extra or "", "dep=(%d+)")) or 0,
+                          dur = ({ 12, 24, 48 })[tonumber(string.match(extra or "", "dur=(%d+)")) or 2] or 24 }      -- 挂了多少小时到期
             posts[name] = posts[name] or {}
             table.insert(posts[name], row)
             out[#out + 1] = row
+        elseif kind == "RESTOCK" then              -- 之前标成自用的，又拿出来卖：成本放回去（不算新花的钱）
+            lots[id .. ":" .. suffix] = lots[id .. ":" .. suffix] or {}
+            table.insert(lots[id .. ":" .. suffix], { t = t, unit = total, left = 1, name = name })
+            for _, r in ipairs(out) do
+                if r.status == "used" and r.name == name then r.status = "restocked" break end
+            end
+        elseif kind == "VENDOR" then               -- 卖给商人了：销掉买入批次，按商人收的钱算
+            local cost
+            for _, ls in pairs(lots) do
+                for _, lot in ipairs(ls) do
+                    if not cost and lot.left > 0 and lot.name == name then lot.left = lot.left - 1; cost = lot.unit end
+                end
+            end
+            out[#out + 1] = { name = name, item_id = id, qty = 1, price = total, cost = cost, posted = t, sold = t, status = "vendor",
+                              net = cost and (total - cost) or nil }
+        elseif kind == "USED" then                 -- 不卖了：把对应的买入批次销掉，不再算压货
+            local cost
+            for _, ls in pairs(lots) do
+                for _, lot in ipairs(ls) do
+                    if not cost and lot.left > 0 and lot.name == name then
+                        lot.left = lot.left - 1
+                        cost = lot.unit
+                    end
+                end
+            end
+            out[#out + 1] = { name = name, item_id = id, qty = 1, cost = cost or total, posted = t, status = "used" }
         elseif kind == "SOLD" or kind == "EXPIRED" or kind == "CANCEL" then
             local q = posts[name]
             local row
@@ -2598,7 +2970,12 @@ function Ledger.Build()
                 row.status, row.sold, row.took = "sold", t, t - row.posted
                 if row.price and row.cost then row.net = math.floor(row.price * (1 - AH_CUT)) - row.cost end
             else
-                row.status = kind == "EXPIRED" and "expired" or "cancelled"
+                row.status, row.ended = kind == "EXPIRED" and "expired" or "cancelled", t
+                if row.cost and row.item_id and row.item_id ~= 0 then        -- 货退回来了，还在你手里：成本放回去，重新上架时接着用
+                    local key = row.item_id .. ":" .. (row.suffix_id or 0)
+                    lots[key] = lots[key] or {}
+                    table.insert(lots[key], 1, { t = row.posted, unit = row.cost / math.max(1, row.qty or 1), left = row.qty or 1, name = row.name })
+                end
             end
         end
     end
@@ -2625,10 +3002,119 @@ function Ledger.Build()
     for h, n in pairs(sum.hours) do
         if not sum.bestHourN or n > sum.bestHourN then sum.bestHour, sum.bestHourN = h, n end
     end
-    table.sort(out, function(a, b) return (a.sold or a.posted or 0) > (b.sold or b.posted or 0) end)
+    local top = { held = 1, used = 2 }                     -- 手里没挂的、标成自用的排最前面：这两种是要你拿主意的
+    table.sort(out, function(a, b)
+        local pa, pb = top[a.status] or 9, top[b.status] or 9
+        if pa ~= pb then return pa < pb end
+        return (a.sold or a.posted or 0) > (b.sold or b.posted or 0)
+    end)
     ledgerRows = out
     Ledger.rows = out
     return sum
+end
+
+-- 经营总览：把账本看成一个小商户的账。存货按买入成本算（不按挂牌价，没卖出去的不算赚到）。
+--   资产 = 现金 + 压在货上的钱 + 垫着的押金
+--   现金流 = 卖货收回 - 买货花掉 - 流拍/撤单赔掉的押金
+-- 只统计账本里记到的买卖：装插件之前的货、钓来的鱼、分解出来的材料都不在里面。
+Ledger.HOLD = 3600        -- 卖出后拍卖行扣押货款的时间（秒）
+function Ledger.Stats()
+    Ledger.Build()
+    local rows = Ledger.rows or {}
+    local dayStart = time() - (tonumber(date("%H")) * 3600 + tonumber(date("%M")) * 60 + tonumber(date("%S")))
+    local S = { cash = GetMoney(), listedN = 0, listedCost = 0, listedAsk = 0, listedNoCost = 0, heldN = 0, heldCost = 0, depHeld = 0,
+                transit = 0, transitN = 0, transitNext = nil,
+                used = { 0, 0 }, usedN = { 0, 0 }, vendorN = { 0, 0 }, buy = { 0, 0 }, back = { 0, 0 }, depLost = { 0, 0 }, profit = { 0, 0 }, sold = { 0, 0 }, failed = { 0, 0 }, tookSum = 0, oldest = {} }
+    local function add(t, when, v) t[2] = t[2] + v; if when and when >= dayStart then t[1] = t[1] + v end end
+    for _, line in ipairs((ForeverQuantDB and ForeverQuantDB.ledger) or {}) do          -- 买货的钱按流水算，最准
+        local t, kind, total = string.match(line, "^(%d+)|(%u+)|%d+|%-?%d+|%d+|(%d+)|")
+        if kind == "BUY" then add(S.buy, tonumber(t), tonumber(total)) end
+    end
+    for _, r in ipairs(rows) do
+        if r.status == "open" then
+            S.listedN = S.listedN + 1
+            S.listedAsk = S.listedAsk + (r.price or 0)
+            S.depHeld = S.depHeld + (r.dep or 0)
+            if r.cost then S.listedCost = S.listedCost + r.cost else S.listedNoCost = S.listedNoCost + 1 end
+            S.oldest[#S.oldest + 1] = r
+        elseif r.status == "held" then
+            S.heldN = S.heldN + (r.qty or 1)
+            S.heldCost = S.heldCost + (r.cost or 0)
+        elseif r.status == "sold" then
+            local got = math.floor((r.price or 0) * (1 - AH_CUT))
+            local due = (r.sold or 0) + Ledger.HOLD                 -- 卖出后拍卖行押一小时，钱才寄到邮箱
+            if due > time() then
+                S.transit, S.transitN = S.transit + got, S.transitN + 1
+                if not S.transitNext or due < S.transitNext then S.transitNext = due end
+            else
+                add(S.back, due, got)                               -- 到账了才算收回
+            end
+            add(S.sold, r.sold, 1)
+            if r.net then add(S.profit, r.sold, r.net) end
+            S.tookSum = S.tookSum + (r.took or 0)
+        elseif r.status == "vendor" then            -- 卖店的钱当场到手
+            add(S.back, r.sold, r.price or 0)
+            add(S.vendorN, r.sold, 1)
+            if r.net then add(S.profit, r.sold, r.net) end
+        elseif r.status == "used" then
+            add(S.used, r.posted, r.cost or 0)
+            add(S.usedN, r.posted, 1)
+        elseif r.status == "expired" or r.status == "cancelled" then
+            add(S.depLost, r.ended, r.dep or 0)
+            add(S.failed, r.ended, 1)
+        end
+    end
+    table.sort(S.oldest, function(a, b) return (a.posted or 0) < (b.posted or 0) end)
+    S.stock = S.listedCost + S.heldCost
+    S.assets = S.cash + S.stock + S.depHeld + S.transit
+    S.ifSold = S.cash + math.floor(S.listedAsk * (1 - AH_CUT)) + S.depHeld + S.heldCost + S.transit
+    S.flow = { S.back[1] - S.buy[1] - S.depLost[1], S.back[2] - S.buy[2] - S.depLost[2] }
+    -- 倒卖这门生意真正的成绩：卖出的净赚，减掉赔掉的押金。自用的货不算亏也不算赚，单列出来
+    S.result = { S.profit[1] - S.depLost[1], S.profit[2] - S.depLost[2] }
+    return S
+end
+local function Signed(c) return (c < 0 and "|cffff6060-" or "|cff40ff40+") .. SilverText(math.abs(c)) .. "|r" end
+function Ledger.BizRows()
+    local S = Ledger.Stats()
+    local out = {}
+    local function head(t) out[#out + 1] = { label = "|cffffd100" .. t .. "|r", a = "", b = "", note = "" } end
+    local function row(label, a, b, note) out[#out + 1] = { label = "   " .. label, a = a or "", b = b or "", note = note or "" } end
+    head("资产（现在）")
+    row("现金", "", SilverText(S.cash), "背包里的金币")
+    row("压在货上的钱", "", SilverText(S.stock), string.format("按买入成本算：在售 %d 件 %s，没挂出去 %d 件 %s%s",
+        S.listedN, SilverText(S.listedCost), S.heldN, SilverText(S.heldCost),
+        S.listedNoCost > 0 and string.format("（另有 %d 件在售的没有买入记录，没算）", S.listedNoCost) or ""))
+    row("卖了还没到账的钱", "", SilverText(S.transit), S.transitN > 0
+        and string.format("%d 笔；拍卖行押一小时才寄到邮箱，最近一笔 %s 后到", S.transitN, Dur(math.max(0, S.transitNext - time())))
+        or "卖出后拍卖行押一小时才寄到邮箱")
+    row("垫着的押金", "", SilverText(S.depHeld), "在售的货的上架押金；卖掉退回，流拍就没了")
+    row("资产合计", "", "|cffffffff" .. SilverText(S.assets) .. "|r", string.format("货占 %.0f%%", S.assets > 0 and S.stock / S.assets * 100 or 0))
+    row("如果在售的全按挂牌价卖光", "", SilverText(S.ifSold), string.format("挂牌总价 %s，扣完抽成；比现在多 %s", SilverText(S.listedAsk), SilverText(math.max(0, S.ifSold - S.assets))))
+    head("现金流")
+    row("买货花掉", "-" .. SilverText(S.buy[1]), "-" .. SilverText(S.buy[2]),
+        S.usedN[2] > 0 and string.format("其中 %s 是后来转自用的 %d 件", SilverText(S.used[2]), S.usedN[2]) or "")
+    row("卖货收回（已到账）", "+" .. SilverText(S.back[1]), "+" .. SilverText(S.back[2]), "扣完 5% 抽成；到账是指寄到了邮箱，要去取信才进背包")
+    row("流拍 / 撤单赔掉的押金", "-" .. SilverText(S.depLost[1]), "-" .. SilverText(S.depLost[2]))
+    row("净现金流", Signed(S.flow[1]), Signed(S.flow[2]), "负数不等于亏：钱变成了货和在路上的货款，看上面的资产")
+    head("经营")
+    row("已实现净赚", Signed(S.profit[1]), Signed(S.profit[2]), "卖出到手 - 买入成本；只算有买入记录的")
+    row("赔掉的押金", "-" .. SilverText(S.depLost[1]), "-" .. SilverText(S.depLost[2]))
+    row("倒卖净成绩", Signed(S.result[1]), Signed(S.result[2]), "已实现净赚 - 赔掉的押金")
+    row("转自用的货（按成本）", SilverText(S.used[1]) .. " / " .. S.usedN[1] .. " 件", SilverText(S.used[2]) .. " / " .. S.usedN[2] .. " 件",
+        "买来没卖、自己留着用了：钱花了，但不算倒卖的亏损，也不算压货")
+    row("卖不掉最后卖店的", S.vendorN[1] .. " 件", S.vendorN[2] .. " 件", "亏的部分已经算在上面的净赚里")
+    row("卖出笔数", tostring(S.sold[1]), tostring(S.sold[2]), S.sold[2] > 0 and ("平均 " .. Dur(S.tookSum / S.sold[2]) .. " 卖掉") or "")
+    row("流拍 / 撤单笔数", tostring(S.failed[1]), tostring(S.failed[2]),
+        (S.sold[2] + S.failed[2]) > 0 and string.format("售出率 %.0f%%", S.sold[2] / (S.sold[2] + S.failed[2]) * 100) or "")
+    if #S.oldest > 0 then
+        head("压得最久的货")
+        for i = 1, math.min(5, #S.oldest) do
+            local r = S.oldest[i]
+            row(r.name or "?", "已挂 " .. Dur(time() - (r.posted or time())), SilverText(r.price or 0),
+                r.cost and ("买入 " .. SilverText(r.cost)) or "没有买入记录")
+        end
+    end
+    return out, S
 end
 
 --------------------------------------------------------------------------------
@@ -2708,6 +3194,41 @@ ForeverQuantModes.SellState = function()
     return string.format("挂出 %s（共 %d 件）", SilverText(nxt.post), inBag), true
 end
 
+-- 买卖记录里逐件拿主意：手里没挂的 -> 不卖了（记成自用，从待上架里拿掉）；标成自用的 -> 再上架（放回待上架）
+ForeverQuantModes.Relist = function(row)
+    if not row or not row.name then return end
+    ForeverQuantDB.holdings = ForeverQuantDB.holdings or {}
+    local hs = ForeverQuantDB.holdings
+    if row.status == "held" then
+        for i, h in ipairs(hs) do if h.name == row.name then table.remove(hs, i) break end end
+        ForeverQuantLedger.Add("USED", row.item_id, 0, 1, math.floor((row.cost or 0) / math.max(1, row.qty or 1)), row.name)
+        print("|cff55ccffFQ|r " .. row.name .. "：不卖了，记成自用。")
+    elseif row.status == "used" then
+        local kn = Trade.Known(row.item_id, row.name)
+        local cost = row.cost or 0
+        local target = (kn and kn.target) or cost * 3      -- 名单上找不到当时的目标价就先按成本的 3 倍；真正挂的时候还会按同款重新定价
+        ForeverQuantLedger.Add("RESTOCK", row.item_id, 0, 1, cost, row.name)
+        Trade.AddHolding(row.item_id, kn and kn.suffix or 0, row.name, cost, target)
+        print(string.format("|cff55ccffFQ|r %s：放回待上架，暂定 %s（挂之前会按同款重新定价）。%s", row.name, SilverText(target),
+            FindInBags(row.item_id, kn and kn.suffix or 0, row.name) and "" or "它现在不在背包里。"))
+    end
+    Refresh()
+end
+
+ForeverQuantModes.ClearPending = function()
+    local hs = ForeverQuantDB.holdings or {}
+    if #hs == 0 then print("|cff55ccffFQ|r 没有待上架的东西。") return end
+    local names = {}
+    for _, h in ipairs(hs) do
+        names[#names + 1] = h.name or "?"
+        ForeverQuantLedger.Add("USED", h.item_id, 0, 1, h.cost or 0, h.name)
+    end
+    ForeverQuantDB.holdings = {}
+    Pricing.cur = nil
+    print(string.format("|cff55ccffFQ|r 已清空待上架的 %d 件（账上记成自用）：%s", #names, table.concat(names, "、")))
+    Refresh()
+end
+
 ForeverQuantModes.Sell = function()
     if not (AuctionHouseFrame and AuctionHouseFrame:IsShown()) then print("|cff55ccffFQ|r 请先打开拍卖行，再点「上架背包里的货」。") return end
     if Trade.posting then return end                       -- 上一件还在确认中
@@ -2724,8 +3245,7 @@ SlashCmdList["FOREVERQUANT"] = function(msg)
     elseif cmd == "sell" then
         ForeverQuantModes.Sell()
     elseif cmd == "unsell" then
-        ForeverQuantDB.holdings = {}
-        print("|cff55ccffFQ|r 待上架名单已清空，不会再自动上架任何东西。")
+        ForeverQuantModes.ClearPending()
     elseif cmd == "holdings" then
         local hs = ForeverQuantDB.holdings or {}
         print(string.format("|cff55ccffFQ|r 待上架的持仓 %d 件：", #hs))

@@ -303,17 +303,26 @@ def recipe_resale(db, scan_id, s, sold_per_day=None, min_net=100, min_roi=0.15, 
 
 RULE_KIND = {"皮甲": "leather", "布甲": "cloth", "锁甲": "mail"}
 
+# 武器按类型分规则：谁会用这种武器，决定了哪些后缀有人要（法杖上的智力有人要，弓上的智力没人要）。
+# 游戏里的武器子类编号 -> 规则名。每类谁会用，写在 config.toml 的 [gear_rule.wearers] 里。
+WEAPON_KEY = {15: "weapon_dagger", 7: "weapon_sword1h", 4: "weapon_mace1h", 0: "weapon_axe1h", 13: "weapon_fist",
+              1: "weapon_2h", 8: "weapon_2h", 6: "weapon_2h", 5: "weapon_mace2h", 10: "weapon_staff",
+              2: "weapon_ranged", 3: "weapon_ranged", 18: "weapon_ranged", 16: "weapon_ranged", 19: "weapon_wand"}
+WEAPON_NAME = {"weapon_dagger": "匕首", "weapon_sword1h": "单手剑", "weapon_mace1h": "单手锤", "weapon_axe1h": "单手斧",
+               "weapon_fist": "拳套", "weapon_2h": "双手剑/斧/长柄", "weapon_mace2h": "双手锤", "weapon_staff": "法杖",
+               "weapon_ranged": "弓/枪/弩", "weapon_wand": "魔杖", "weapon": "武器"}
+
 
 def rule_key(r):
     """这一行适用哪条规则：首饰和披风单独一类，武器一类，其余按护甲类型。没有规则返回 None。"""
     if r["equip_loc"] in ("INVTYPE_CLOAK", "INVTYPE_FINGER", "INVTYPE_NECK"):
         return "jewelry_cloak"
     if r["class_id"] == 2:
-        return "weapon"
+        return WEAPON_KEY.get(r["subclass_id"], "weapon")
     return RULE_KIND.get(r["kind"])
 
 
-KEY_KIND = {"leather": "皮甲", "cloth": "布甲", "mail": "锁甲", "weapon": "武器"}
+KEY_KIND = {"leather": "皮甲", "cloth": "布甲", "mail": "锁甲", **{k: "武器" for k in WEAPON_NAME}}
 
 
 ROLE_NAME = {"mage": "法师", "warlock": "术士", "priest": "牧师", "caster": "法系", "melee": "盗贼/近战", "paladin": "圣骑", "druid": "德鲁伊", "druid_caster": "法系德", "feral": "野德"}
@@ -608,7 +617,7 @@ def find_by_rule(rows, s, rule, sold=None, max_price=None, prem=None):
             c.name, c.suffix_id = r["name"], r["suffix_id"]
             unsure = r["label"] in (rule.get("uncertain") or [])
             ok = is_confirmed(rule, key, r["label"])
-            what = {"jewelry_cloak": "首饰/披风", "weapon": "武器"}.get(key, r["kind"])
+            what = {"jewelry_cloak": "首饰/披风", **WEAPON_NAME}.get(key, r["kind"])
             c.notes = [f"{what} {r['label']}，物品等级 {level}" + (f"，需求等级 {req}" if req else "")
                        + f"；这件装备的地板价 {silver(floor)}",
                        "同件装备其他热门后缀挂价：" + " / ".join(silver(o) for o in others[:5]),

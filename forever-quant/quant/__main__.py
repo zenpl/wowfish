@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import backtest, collector, config, database, disenchant, export_lua, gear, questiedb, risk, strategies, tod, watch
+from . import backtest, collector, config, database, disenchant, export_lua, gear, questiedb, risk, strategies, tod, watch, blue as bluemod
 from .config import gold
 
 
@@ -272,7 +272,7 @@ def cmd_gear(cfg, db, a):
             multi={}, multi_note={}, multi_n={}, role_short={}, premium_full_level=rule.get("premium_full_level", 34),
             nstats={l: len(v) for l, v in (rule.get("suffix_stats") or {}).items()}, stars_3=rule.get("stars_3", 85), stars_2=rule.get("stars_2", 55),
             stats_cn={l: gear.stats_cn(rule, l) for l in (rule.get("suffix_stats") or {})},
-            hot={k: gear.hot_suffixes(rule, k, prem) for k in ("leather", "cloth", "mail", "weapon", "jewelry_cloak")},
+            hot={k: gear.hot_suffixes(rule, k, prem) for k in (rule.get("wearers") or {})},
             value={}, star={}, role={}, ok={}, role_key={}, role_value={},
             stats=rule.get("suffix_stats") or {})
     if rule_export:
@@ -310,7 +310,7 @@ def cmd_gear(cfg, db, a):
     names.update({o.cand.item_id: o.cand.name for o in extra})
     path = export_lua.export(all_orders, names, cfg["market"]["id"], int(time.time()), cur["scanned_at"],
                              recipes=recs, ah_cut=cfg["strategy"]["ah_cut"], disenchant=de_ops[:200], watch=watches,
-                             rule=rule_export, de=de_export, tod=_tod(cfg, db, snap),
+                             rule=rule_export, de=de_export, tod=_tod(cfg, db, snap), blue=_blue(cfg, db, snap),
                              prices={i: q for i, q in db.execute(
                                  "SELECT item_id, min_buyout FROM quotes WHERE snapshot_id=? AND min_buyout>0 AND sold_per_day>=1",
                                  (snap["id"],))} if snap else None)
@@ -375,6 +375,37 @@ def _tod(cfg, db, snap):
     except Exception as e:
         print(f"时段分析跳过：{e}")
         return None
+
+
+def _blue(cfg, db, snap):
+    if not snap:
+        return None
+    try:
+        return bluemod.build(cfg, db, snap["id"])
+    except Exception as e:
+        print(f"蓝色武器分析跳过：{e}")
+        return None
+
+
+def cmd_blue(cfg, db, a):
+    snap = database.latest_snapshot(db, cfg["market"]["id"])
+    if not snap:
+        sys.exit("还没有行情快照，先运行 collect")
+    b = bluemod.build(cfg, db, snap["id"], max_age_hours=0 if a.force else 6)
+    if not b:
+        sys.exit("没有装备库：需要本机装了 DungeonsForeverGear 插件")
+    rows = []
+    for it in b["items"]:
+        v, net = bluemod.judge(it, ah_cut=cfg["strategy"]["ah_cut"], min_roi=cfg["strategy"]["min_roi"])
+        rows.append((v, net, it))
+    order = {"可以进": 0, "可以进（走得慢）": 1, "偏低": 2, "等": 3, "在跌，先别进": 4, "高位（出货）": 5, "没货": 6}
+    rows.sort(key=lambda r: (order[r[0]], -r[1] * min(r[2]["spd"], 5)))
+    print(f"40 级以下的蓝色武器 {len(rows)} 把（进货线 = 一周里最低价的下四分位；平时最低 = 中位数）\n")
+    print(f"{'武器':<12}{'类型':<6}{'需求':>4}{'现价':>9}{'进货线':>9}{'平时最低':>9}{'高位':>9}{'日销':>6}{'在售':>5}  {'结论':<10}{'按平时价净赚':>10}")
+    for v, net, it in rows:
+        print(f"{it['name'][:11]:<12}{it['kind']:<6}{it['req']:>4}{gold(it['cur']):>10}{gold(it['low']):>10}{gold(it['typ']):>10}"
+              f"{gold(it['high']):>10}{it['spd']:>6.1f}{it['qty']:>5}  {v:<10}{gold(net) if net > 0 else '-':>10}")
+    print("\n价格和日销来自行情源的挂单快照，日销是估计值；买之前在拍卖行核对实时价格。")
 
 
 def cmd_tod(cfg, db, a):
@@ -563,6 +594,7 @@ def main():
     p = sub.add_parser("writeoff"); p.add_argument("trade_id", type=int); p.add_argument("--recovered", type=int, default=0, help="卖店等回收的铜币")
     p = sub.add_parser("gear", help="分析游戏内 /fq scan 的绿装扫描")
     p.add_argument("--file", help="指定存盘文件（默认自动找）"); p.add_argument("--top", type=int, default=30)
+    p = sub.add_parser("blue", help="蓝色武器逐件的价格画像和进货线"); p.add_argument("--force", action="store_true", help="不用缓存，重新拉")
     p = sub.add_parser("tod", help="大宗货一天里各时段的价格规律"); p.add_argument("--force", action="store_true", help="不用缓存，重新拉")
     for name in ("trades", "report", "review", "install", "watch", "auto", "marks"):
         sub.add_parser(name)

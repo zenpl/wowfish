@@ -86,7 +86,7 @@ need_bonus = 5
 
 
 # 属性是我推断的后缀：命中了也不算"有成交验证"，面板里会标出来。确认过的从这里删掉。
-uncertain = ["魔法之", "野兽之", "防御者之", "骑士之", "长者之", "祭司之"]
+uncertain = ["防御者之", "骑士之"]     # 这两个只查到后期版本的属性，资料片版本的原文没找到
 
 # 不追踪的后缀：不管常识规则还是挂价数据怎么说都不算热门。
 # 引导者之：玩家判断这个词条效果太弱，不值得追。
@@ -171,7 +171,21 @@ secondary = { sta = 0.8, int = 0.8, sp = 0.6, heal = 0.6 }     # 耐力、智力
 cloth = ["mage", "warlock", "priest"]
 leather = ["melee", "druid", "druid_caster"] # 盗贼（以及 40 级前的猎人、增强萨）；德鲁伊（力量路线）；法系德
 mail = ["paladin"]                           # 40 级前穿锁甲的是战士和圣骑，战士要的属性圣骑这组都覆盖了
-weapon = ["melee", "druid", "druid_caster", "mage", "warlock", "priest", "paladin"]
+weapon = ["melee", "druid", "druid_caster", "mage", "warlock", "priest", "paladin"]   # 认不出类型的武器才用这条
+# 武器按类型分：这种武器上，哪些人愿意为后缀多花钱。
+# 先按"谁能用这种武器"填了一版，再拿一次全量扫描核对：同一件武器上，"有人要的后缀"的最低挂价是"没人要的"的几倍（物品等级 15-40）。
+# 结论：武器上有溢价的几乎只有敏捷/攻强类后缀（melee 这组：盗贼、猎人、增强萨）；法系拿武器当属性棒，并不愿意多花钱。
+# 依据是挂价不是成交价，也没有玩家实测过，所以武器的结果一律标"未验证"，不会因为星级高就自动买。
+weapon_dagger = ["melee"]                     # 3.23 倍（加上法系就掉到 1.28）
+weapon_sword1h = ["melee", "paladin"]         # 1.96 倍（只算 melee 2.17；加上法师术士掉到 1.13）
+weapon_axe1h = ["melee", "paladin"]           # 1.32 倍（只算 melee 1.76）
+weapon_2h = ["melee"]                         # 双手剑/斧/长柄：1.76 倍；力量后缀（战士）单看是 1.00，没有溢价
+weapon_mace2h = ["paladin", "druid", "melee"] # 1.94 倍；这一类力量后缀有溢价（2.12）
+weapon_staff = ["melee"]                      # 敏捷法杖 1.65 倍（猎人、野德）；法系的智力/法伤杖只有 1.08，不算
+weapon_fist = ["melee", "druid"]              # 样本不够，按常识
+weapon_ranged = ["melee"]                     # 弓/枪/弩：样本不够，按常识（猎人主武器）
+weapon_wand = ["mage", "warlock", "priest"]   # 样本不够，按常识
+weapon_mace1h = []                            # 单手锤：怎么分都是 1.00，看不出谁愿意多花钱，先不出候选
 jewelry_cloak = ["melee", "druid", "druid_caster", "mage", "warlock", "priest", "paladin"]
 
 # 每个后缀加什么属性。前 15 个是经典的固定搭配；标了 "?" 注释的是我按名字和挂价推断的，不确定，发现不对就改。
@@ -208,15 +222,15 @@ jewelry_cloak = ["melee", "druid", "druid_caster", "mage", "warlock", "priest", 
 "神圣惩戒之" = ["sp_holy"]
 "自然惩戒之" = ["sp_nature"]
 "暗影惩戒之" = ["sp_shadow"]
-"魔法之" = ["sp"]                       # ? 布甲上挂价溢价最高（x7.8），按全系法伤算
+"魔法之" = ["sp"]                       # 玩家确认：法术伤害和治疗（一条属性，伤害治疗都加）。实例：魔法之唤雨者短帽 +14
 "巫师之" = ["int", "sta", "sp"]
 "引导者之" = ["int", "sp"]               # ? 法系后缀（智力 + 法伤 + 法术暴击）
 "强盗之" = ["agi", "sta", "ap"]
-"野兽之" = ["crit", "sta"]              # ? 命中 + 暴击 + 耐力
+"野兽之" = ["str", "agi", "sta"]        # of the Beast。查证（Wowhead 资料片版本物品页）：力量 + 敏捷 + 耐力。之前我填的"命中+暴击+耐力"是后期版本的
 "勇士之" = ["str", "sta", "def"]
-"防御者之" = ["str", "sta", "crit"]      # ?
-"骑士之" = ["sta", "sp", "def"]         # ?
-"长者之" = ["sta", "int", "mp5"]        # ?
+"防御者之" = ["sta", "str", "block"]     # ? of the Defender。只查到后期版本：耐力 + 力量 + 格挡/招架；资料片版本没找到原文
+"骑士之" = ["sta", "sp", "def"]         # ? of the Knight。只查到后期版本：耐力 + 法术强度 + 躲闪；资料片版本应是耐力 + 法伤 + 防御，没找到原文
+"长者之" = ["sta", "int", "mp5"]        # of the Elder。查证：耐力 + 智力 + 5 秒回蓝
 "医师之" = ["sta", "int", "heal"]
-"祭司之" = ["sta", "spi", "heal"]       # ?
+"祭司之" = ["sta", "spi", "heal"]       # of the Hierophant（按中文名对应的）。查证：耐力 + 精神 + 治疗
 "预言之" = ["int", "spi", "heal"]
