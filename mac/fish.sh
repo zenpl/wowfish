@@ -4,9 +4,10 @@
 set -e
 cd "$(dirname "$0")"
 
-if [ ! -x .venv/bin/python ]; then
-    echo "首次运行，创建虚拟环境并安装依赖……"
-    python3 -m venv .venv
+# 用"能否导入依赖"判断，而不是 .venv 是否存在：安装被中断过也能自动补齐
+if ! .venv/bin/python -c "import numpy, sounddevice, Quartz, AppKit" 2>/dev/null; then
+    echo "创建虚拟环境并安装依赖……"
+    [ -x .venv/bin/python ] || python3 -m venv .venv
     .venv/bin/pip install -q numpy sounddevice pyobjc-framework-Quartz pyobjc-framework-Cocoa
 fi
 
