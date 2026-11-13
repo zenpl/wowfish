@@ -15,7 +15,8 @@ import sounddevice as sd
 from AppKit import NSWorkspace
 from Foundation import NSDate, NSRunLoop
 
-RATE, CHUNK = 16000, 800            # 和 fisher.py 一致：50ms 一段
+_SRGB = Quartz.CGColorSpaceCreateWithName(Quartz.kCGColorSpaceSRGB)
+RATE, CHUNK = 16000, 800           # 和 fisher.py 一致：50ms 一段
 APP_HINTS = ("world of warcraft", "wow", "魔兽世界", "魔獸世界")
 
 # ANSI 键盘的虚拟键码
@@ -59,10 +60,17 @@ def grab(x, y, w, h):
     if img is None:
         raise RuntimeError("截不到屏幕：检查'屏幕录制'权限")
     width, height = Quartz.CGImageGetWidth(img), Quartz.CGImageGetHeight(img)
-    row = Quartz.CGImageGetBytesPerRow(img)
-    data = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img))
+    # 截到的像素是显示器色彩空间里的值（P3 屏上 sRGB 纯绿会变成 117,251,76），信号色全对不上。
+    # 画进一个 sRGB 位图让系统换算回去，拿到的才是插件设的颜色（真机上踩过）。
+    ctx = Quartz.CGBitmapContextCreate(None, width, height, 8, width * 4, _SRGB,
+                                       Quartz.kCGImageAlphaNoneSkipLast | Quartz.kCGBitmapByteOrder32Big)
+    Quartz.CGContextSetInterpolationQuality(ctx, Quartz.kCGInterpolationNone)
+    Quartz.CGContextDrawImage(ctx, Quartz.CGRectMake(0, 0, width, height), img)
+    out = Quartz.CGBitmapContextCreateImage(ctx)
+    row = Quartz.CGImageGetBytesPerRow(out)
+    data = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(out))
     a = np.frombuffer(data, dtype=np.uint8).reshape(height, row // 4, 4)[:, :width]
-    return a[:, :, 2::-1].astype(np.int16)             # BGRA -> RGB
+    return a[:, :, :3].astype(np.int16)                # RGBX -> RGB
 
 
 # ---------- 键盘 / 前台 ----------
